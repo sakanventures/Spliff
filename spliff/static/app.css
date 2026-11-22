@@ -1,0 +1,70 @@
+:root {
+  color-scheme: dark;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background: #101311; color: #f0f2ea;
+  --edge: #303931; --muted: #aebbb0; --accent: #c7ef9e; --panel: #191e1a;
+}
+* { box-sizing: border-box; }
+body { margin: 0; }
+[hidden] { display: none !important; }
+.top { display: flex; justify-content: space-between; align-items: center; padding: 20px max(5vw, calc((100vw - 1150px)/2)); border-bottom: 1px solid var(--edge); }
+.brand, .local { display: flex; align-items: center; gap: .7rem; }
+.brand { font-weight: 750; letter-spacing: -.02em; }
+.record { width: 25px; height: 25px; border-radius: 50%; background: radial-gradient(circle, #161c16 0 12%, var(--accent) 14% 28%, #60834c 30% 35%, var(--accent) 37% 55%, #60834c 57% 62%, var(--accent) 64%); }
+.local { color: var(--muted); font-size: .82rem; }
+.local span { width: .45rem; height: .45rem; border-radius: 50%; background: var(--accent); }
+main { width: min(90vw, 1150px); margin: auto; }
+.hero { padding: 50px 0 25px; }
+h1 { margin: 0; font-size: clamp(2.8rem, 7vw, 5.1rem); letter-spacing: -.075em; line-height: 1; }
+.hero p, footer, .muted, .message { color: var(--muted); }
+.hero p { line-height: 1.55; }
+.metrics { margin: 0 0 35px; display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+.metrics div { padding: 19px 22px; border: 1px solid var(--edge); background: var(--panel); border-radius: 15px; }
+dt { color: var(--muted); font-size: .87rem; }
+dd { margin: 8px 0 0; font-size: 2.3rem; font-weight: 650; letter-spacing: -.06em; font-variant-numeric: tabular-nums; }
+.metrics div:nth-child(2) dd { color: var(--accent); }
+nav { display: flex; gap: 8px; margin-bottom: 12px; }
+button, input, select { font: inherit; border-radius: 8px; color: inherit; border: 1px solid var(--edge); padding: 10px 13px; background: #121612; }
+button { cursor: pointer; font-weight: 650; }
+button:hover { border-color: var(--accent); }
+button[aria-pressed="true"], form button { background: var(--accent); border-color: var(--accent); color: #152014; }
+:focus-visible { outline: 2px solid #e6ffc9; outline-offset: 3px; }
+.panel { border: 1px solid var(--edge); background: var(--panel); border-radius: 16px; overflow: hidden; }
+form { display: flex; align-items: flex-end; gap: 10px; padding: 18px; }
+label { display: grid; gap: 6px; font-size: .85rem; color: var(--muted); min-width: 0; }
+label:first-child { flex: 1; }
+input, select { width: 100%; }
+.table-wrap { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; min-width: 620px; }
+th, td { text-align: left; padding: 13px 18px; border-top: 1px solid var(--edge); vertical-align: top; overflow-wrap: anywhere; }
+th { font-size: .78rem; color: var(--muted); background: #151a16; }
+td:first-child { width: 44%; }
+small { display: block; margin-top: 5px; line-height: 1.45; }
+.message { margin: 0; padding: 15px 18px; line-height: 1.5; }
+.more { margin: 0 18px 18px; }
+.review { border-bottom: 1px solid var(--edge); padding: 18px; overflow-wrap: anywhere; }
+.review h2 { margin: 0 0 .6rem; font-size: 1.08rem; }
+.comparison { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+.comparison h3 { font-size: .8rem; color: var(--muted); }
+.comparison p { margin: .35rem 0; }
+footer { padding: 20px 0 32px; font-size: .82rem; line-height: 1.5; }
+@media (max-width: 640px) {
+  .hero { padding-top: 34px; }
+  .metrics { grid-template-columns: repeat(2, 1fr); }
+  form { flex-wrap: wrap; }
+  label:first-child { flex-basis: 100%; }
+  .comparison { grid-template-columns: 1fr; }
+}
+.track-actions { min-width: 9.5rem; }
+.track-actions button { display: block; margin-bottom: 5px; white-space: nowrap; font-size: .82rem; }
+button:disabled { cursor: wait; opacity: .6; }
+#action-status { margin: 0 0 14px; border: 1px solid var(--edge); border-radius: 10px; }
+dialog { width: min(90vw, 490px); border: 1px solid var(--edge); border-radius: 16px; background: var(--panel); color: inherit; padding: 22px; }
+dialog::backdrop { background: #060906bd; }
+.dialog-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.dialog-heading h2 { margin: 0; font-size: 1.15rem; }
+#candidate-original, #candidate-status { overflow-wrap: anywhere; color: var(--muted); }
+#drop-zone { padding: 16px; border: 1px dashed var(--muted); border-radius: 10px; text-align: center; }
+#drop-zone.dragging { border-color: var(--accent); background: #233524; }
+#drop-zone p { margin: 0 0 12px; }
+#choose-candidate { color: #152014; background: var(--accent); }

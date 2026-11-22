@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "spliff-music-curator"
+version = "0.1.0"
+description = "A local music library catalog and lossless-upgrade review tool"
+readme = "README.md"
+requires-python = ">=3.9"
+license = "MIT"
+license-files = ["LICENSE"]
+
+[project.scripts]
+spliff = "spliff.__main__:main"
+
+[tool.setuptools]
+packages = ["spliff"]
+
+[tool.setuptools.package-data]
+spliff = ["static/*.html", "static/*.css", "static/*.js"]

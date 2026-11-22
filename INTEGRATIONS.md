@@ -1,0 +1,23 @@
+# Integration plan
+
+## Nicotine+ and Soulseek
+
+The MVP uses manually staged local files. The first automated provider should be a small Nicotine+ plugin with a versioned local bridge. Keep Nicotine+ core calls inside that plugin and keep peer credentials in Nicotine+.
+
+- The tagged 3.3.11 search implementation exposes `core.search.do_search(term, "global", switch_page=False)` internally. It emits `add-search` with its token. Correlate results via the internal `file-search-response` event. The outgoing search plugin hook runs before results and serves a different purpose. Validate event ordering and unsubscription inside the exact macOS build before depending on it. [3.3.11 search source](https://github.com/nicotine-plus/nicotine-plus/blob/3.3.11/pynicotine/search.py)
+- The tagged download core exposes `enqueue_download(username, virtual_path, folder_path=..., size=..., file_attributes=...)`. The plugin system exposes `download_finished_notification(user, virtual_path, real_path)`. Provide a curator-controlled staging destination outside all library roots. Reconcile results and transfer callbacks with a persisted job ID. The peer path is an opaque identifier and the reported local path must pass staging containment checks before inspection. [Download source](https://github.com/nicotine-plus/nicotine-plus/blob/3.3.11/pynicotine/downloads.py), [plugin source](https://github.com/nicotine-plus/nicotine-plus/blob/3.3.11/pynicotine/pluginsystem.py)
+- Treat the core methods and event bus as version-sensitive. Upstream master already differs in search token handling and download arguments. Confirm the installed version, then test search correlation, canceled or repeated requests, reconnects, queued and failed transfers, duplicate names, and completion on macOS with authorized test media. An authenticated Unix socket in a private local directory is the proposed bridge. [Upstream search](https://github.com/nicotine-plus/nicotine-plus/blob/master/pynicotine/search.py), [upstream downloads](https://github.com/nicotine-plus/nicotine-plus/blob/master/pynicotine/downloads.py)
+- Start with track and album search. Present up to three candidates alongside title, edition cues, advertised format, completeness, and availability. Add discography requests as batches of album searches. Keep live takes, radio edits, remixes, and unknown editions separate. Require selection before queueing. After completion, probe downloaded media and retain provenance in the review record.
+- slskd is a viable separate Soulseek provider if the internal Nicotine+ interfaces prove too brittle. It operates as its own daemon with API support. Check the deployed build's API schema and access controls before implementing that adapter. [slskd README](https://github.com/slskd/slskd/blob/master/README.md), [configuration](https://github.com/slskd/slskd/blob/master/docs/config.md)
+
+Source interfaces were checked against Nicotine+ 3.3.11 and compared with upstream master. The desktop plugin and a live Soulseek account still need runtime validation.
+
+## Spek-style analysis
+
+Spek provides a desktop spectrogram and uses FFmpeg for decoding. Use an independent FFmpeg-backed analysis module to generate labeled PNGs on demand in the app cache. The local FFmpeg 8.1.2 build generated a labeled PNG with `showspectrumpic` from a synthetic tone. The initial UI should display comparable time and frequency axes, channel selection, and the segment inspected. Keep analysis outside the scan loop and bound runtime and output size. [Spek manual](https://github.com/alexkay/spek/blob/master/MANUAL.md), [Spek dependencies](https://github.com/alexkay/spek/blob/master/README.md), [FFmpeg filter source](https://github.com/FFmpeg/FFmpeg/blob/master/libavfilter/avf_showspectrum.c)
+
+Use known low-pass audio and deliberately transcoded test fixtures before adding cutoff hints. Bass-heavy recordings, older masters, filters, microphone limits, and source transfers can also show little high-frequency energy. A cutoff can prompt review. Edition matching and provenance remain separate decisions.
+
+## Preservation rules for future actions
+
+Every automated transfer terminates in staging. The review record should capture both content hashes and observed metadata. A protected original stays in place. Any future library import should be an explicitly selected operation with a new destination and a collision check. Promotion, if ever introduced, should have its own approval and rollback design.

@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Spliff</title>
+  <link rel="stylesheet" href="/app.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header class="top">
+    <div class="brand"><span class="record" aria-hidden="true"></span> Spliff</div>
+    <button id="scan">Scan a folder</button>
+  </header>
+  <main>
+    <section class="hero">
+      <h1>Music library</h1>
+      <p>Browse your collection and compare staged lossless candidates.</p>
+    </section>
+    <p id="action-status" class="message" role="status" hidden></p>
+    <dl class="metrics">
+      <div><dt>Indexed tracks</dt><dd id="tracks">–</dd></div>
+      <div><dt>Lossless</dt><dd id="lossless">–</dd></div>
+      <div><dt>Lossy</dt><dd id="lossy">–</dd></div>
+      <div><dt>Protected</dt><dd id="protected">–</dd></div>
+    </dl>
+    <nav aria-label="Catalog views">
+      <button id="browse" aria-pressed="true">Track index</button>
+      <button id="staged" aria-pressed="false">Staged reviews</button>
+    </nav>
+    <section id="index" aria-label="Track index" class="panel">
+      <form id="filters">
+        <label>Search<input id="search" type="search" maxlength="300" placeholder="Artist, album, track, or path"></label>
+        <label>Filter<select id="scope">
+          <option value="all">All available tracks</option>
+          <option value="lossless">Lossless</option>
+          <option value="lossy">Lossy</option>
+          <option value="protected">Protected</option>
+          <option value="errors">Inspection errors</option>
+          <option value="missing">Missing</option>
+        </select></label>
+        <button type="submit">Search</button>
+      </form>
+      <div class="table-wrap" id="table" hidden>
+        <table><thead><tr><th scope="col">Track</th><th scope="col">Album</th><th scope="col">Encoding</th><th scope="col">Status</th><th scope="col">Actions</th></tr></thead><tbody id="rows"></tbody></table>
+      </div>
+      <p class="message" id="status" role="status">Loading catalog…</p>
+      <button class="more" id="more" hidden>Load more</button>
+    </section>
+    <section id="review-panel" aria-label="Staged reviews" class="panel" hidden>
+      <div id="reviews"></div>
+      <p class="message" id="review-status" role="status"></p>
+    </section>
+    <dialog id="candidate-dialog" aria-labelledby="candidate-heading">
+      <div class="dialog-heading">
+        <h2 id="candidate-heading">Compare a lossless file</h2>
+        <button id="close-candidate" type="button">Close</button>
+      </div>
+      <p id="candidate-original"></p>
+      <div id="drop-zone">
+        <p>Drop a FLAC, WAV, AIFF, or ALAC file here</p>
+        <button id="choose-candidate" type="button">Choose a file</button>
+        <input id="candidate-file" type="file" accept=".flac,.wav,.aif,.aiff,.alac,.m4a" hidden>
+      </div>
+      <p id="candidate-status" role="status"></p>
+    </dialog>
+    <footer>Music files are read-only. Preservation flags and staged comparisons live in the catalog.</footer>
+  </main>
+</body>
+</html>

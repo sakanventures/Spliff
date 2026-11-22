@@ -1,0 +1,96 @@
+"""Incremental probing with an atomic catalog update per scan."""
+import os
+import stat
+import subprocess
+from contextlib import closing
+from pathlib import Path
+from uuid import uuid4
+
+from .catalog import EXTENSIONS, connect, find_probe, initialize, read_audio, signature
+
+AUDIO_FIELDS = ("title", "artist", "album", "codec", "format", "quality",
+                "duration", "bitrate", "sample_rate", "bits")
+
+def inside(path, root):
+    return path == root or root in path.parents
+
+def scan(db, root, progress=None):
+    db = db.resolve()
+    root = root.resolve(strict=True)
+    if not root.is_dir():
+        raise ValueError("The music folder is unavailable")
+    if inside(db, root):
+        raise ValueError("The SQLite catalog must be outside the music library")
+    binary = find_probe()
+    initialize(db)
+    token = uuid4().hex
+    counts = dict(probed=0, cached=0, errors=0, missing=0)
+    root_name = str(root)
+
+    def walk_error(error):
+        raise error
+
+    with closing(connect(db)) as connection, connection:
+        connection.execute("BEGIN IMMEDIATE")
+        root_info = root.stat()
+        identity = (root_info.st_dev, root_info.st_ino)
+        roots = connection.execute("SELECT path,device,inode FROM roots").fetchall()
+        for prior in roots:
+            prior_path = Path(prior["path"])
+            if prior_path == root:
+                if tuple(prior)[1:] != identity:
+                    raise ValueError("The library root changed identity. Verify the mounted drive.")
+            elif inside(prior_path, root) or inside(root, prior_path):
+                raise ValueError("Library roots cannot overlap")
+        connection.execute("INSERT OR IGNORE INTO roots VALUES (?,?,?)", (root_name, *identity))
+        for folder, directories, files, folder_fd in os.fwalk(root, onerror=walk_error, follow_symlinks=False):
+            folder_info = os.fstat(folder_fd)
+            if folder == root_name and (folder_info.st_dev, folder_info.st_ino) != identity:
+                raise ValueError("The library root changed during scan")
+            directories[:] = sorted(name for name in directories if not name.startswith("."))
+            for name in sorted(files):
+                if name.startswith(".") or Path(name).suffix.lower() not in EXTENSIONS:
+                    continue
+                info = os.stat(name, dir_fd=folder_fd, follow_symlinks=False)
+                if not stat.S_ISREG(info.st_mode):
+                    continue
+                path = str((Path(folder) / name).relative_to(root))
+                path.encode("utf-8")
+                fingerprint = signature(info)
+                previous = connection.execute("""
+                    SELECT size,mtime,device,inode,error FROM tracks WHERE root=? AND path=?
+                """, (root_name, path)).fetchone()
+                if previous and tuple(previous) == (*fingerprint, None):
+                    connection.execute("UPDATE tracks SET seen=?,present=1 WHERE root=? AND path=?",
+                                       (token, root_name, path))
+                    counts["cached"] += 1
+                    if progress and counts["cached"] % 1000 == 0:
+                        progress(dict(counts))
+                    continue
+                error = None
+                try:
+                    metadata = read_audio(binary, folder_fd, name, fingerprint)
+                    counts["probed"] += 1
+                except (OSError, ValueError, KeyError, IndexError, subprocess.SubprocessError) as exc:
+                    metadata = {}
+                    error = "Audio inspection failed (" + type(exc).__name__ + ")"
+                    counts["errors"] += 1
+                columns = ("root", "path", *AUDIO_FIELDS, "size", "mtime", "device",
+                           "inode", "seen", "error", "present")
+                updates = ",".join(f"{key}=excluded.{key}" for key in columns[2:])
+                connection.execute(
+                    f"INSERT INTO tracks({','.join(columns)}) VALUES ({','.join('?' for _ in columns)}) "
+                    f"ON CONFLICT(root,path) DO UPDATE SET {updates}",
+                    (root_name, path, *(metadata.get(key) for key in AUDIO_FIELDS),
+                     *fingerprint, token, error, 1),
+                )
+                examined = counts["probed"] + counts["errors"]
+                if progress and examined % 100 == 0:
+                    progress(dict(counts))
+        ending = root.stat()
+        if (ending.st_dev, ending.st_ino) != identity:
+            raise ValueError("The library root changed during scan")
+        counts["missing"] = connection.execute(
+            "UPDATE tracks SET present=0 WHERE root=? AND present=1 AND seen<>?",
+            (root_name, token)).rowcount
+    return counts
