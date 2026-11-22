@@ -18,11 +18,23 @@ def queue(db, candidate_id=None, *, original_id=None):
     kind, _, _ = selection_parts(candidate_id)
     if original_id is not None:
         indexed = originals(db, original_id, kind)
-        if kind != "album" or not indexed[0]["album"]:
+        if kind == "album" and not indexed[0]["album"]:
             raise ValueError("Choose an indexed album to compare.")
     with closing(connect(db)) as connection:
         roots = [row["path"] for row in connection.execute("SELECT path FROM roots")]
-    result = request("queue", selection=candidate_id, roots=roots)
+    try:
+        result = request("queue", selection=candidate_id, roots=roots)
+    except ValueError as exc:
+        if "did not confirm the action" not in str(exc):
+            raise
+        # The GUI action may already have started and written its manifest.
+        # Never retry queueing on an uncertain acknowledgement.
+        try:
+            result = request("download_status", selection=candidate_id)
+        except (ValueError, OSError):
+            result = {"id": candidate_id, "items": [], "state": "confirmation_pending",
+                      "requires_status_check": True,
+                      "message": "Nicotine+ has not confirmed this action. Check nicotine_transfer_status before any retry; do not treat this as a definite failure."}
     if original_id is not None:
         with closing(connect(db)) as connection, connection:
             connection.execute("""

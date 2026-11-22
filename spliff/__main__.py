@@ -12,16 +12,25 @@ from .review import protect, stage
 from .nicotine import install_plugin, request
 from .scanner import scan
 from .spectral import analyze_track
+from .artist import library as artist_library, upgrades as artist_upgrades
 
 def main():
     parser = argparse.ArgumentParser(prog="Spliff")
     parser.add_argument("--db", type=Path,
                         default=Path.home() / "Library/Application Support/Spliff/catalog.sqlite")
     commands = parser.add_subparsers(dest="command", required=True)
+    services_parser = commands.add_parser("services", help="Manage background Mac services")
+    services_parser.add_argument("arguments", nargs=argparse.REMAINDER)
     scan_parser = commands.add_parser("scan", help="Index a music folder read-only")
     scan_parser.add_argument("root", type=Path)
     spectrum = commands.add_parser("spectrum", help="Analyze an indexed track locally")
     spectrum.add_argument("id", type=int)
+    for command in ("artist-library", "artist-upgrades"):
+        artist = commands.add_parser(command, help="Inspect owned artist releases" if command == "artist-library"
+                                     else "Search for upgrades of owned artist releases")
+        artist.add_argument("artist")
+        artist.add_argument("--after", type=int, default=0)
+        artist.add_argument("--limit", type=int, default=3 if command == "artist-upgrades" else 50)
     ui = commands.add_parser("serve", help="Open the local read-only dashboard")
     ui.add_argument("--port", type=int, default=8765)
     mcp_parser = commands.add_parser("mcp", help="Expose Spliff tools over stdio")
@@ -46,6 +55,10 @@ def main():
     args = parser.parse_args()
     db = args.db.expanduser().resolve()
     try:
+        if args.command == "services":
+            from .services import main as services_main
+            print(json.dumps(services_main(db, args.arguments), indent=2))
+            return 0
         if args.command == "discogs-setup":
             setup_discogs()
             return 0
@@ -69,6 +82,9 @@ def main():
             web.serve(db, args.port)
         elif args.command == "spectrum":
             print(json.dumps(analyze_track(db, args.id)))
+        elif args.command in ("artist-library", "artist-upgrades"):
+            operation = artist_library if args.command == "artist-library" else artist_upgrades
+            print(json.dumps(operation(db, args.artist, args.after, args.limit)))
         elif args.command == "mcp":
             mcp.serve(db, search_only=args.search_only, allow_downloads=args.allow_downloads,
                       allow_discogs=args.allow_discogs)

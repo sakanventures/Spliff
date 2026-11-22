@@ -107,6 +107,8 @@ def search(_db, query=None, kind="track", limit=3):
             (dict(file, candidate_id=f"track-{search_id}-{index}") if search_id else file
              for index, file in enumerate(files)), key=availability,
         )
+    from .candidates import record
+    record(_db, query, kind, candidates[:limit], files)
     return {
         "query": query, "kind": kind, "candidates": candidates[:limit],
         "observed_matches": len(candidates), "search_window_seconds": WINDOW_SECONDS,

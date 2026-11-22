@@ -14,6 +14,7 @@ from .nicotine import search
 from .review import protect, reviews, stage
 from .scanner import scan
 from .spectral import analyze_track, analyze_download
+from .artist import library as artist_library, upgrades as artist_upgrades
 from .staged_downloads import list_downloads, queue, review_download
 
 MAX_CANDIDATE_BYTES = 512 * 1024 * 1024
@@ -43,6 +44,8 @@ def serve(db, port):
                     self.reply_json(replacement_preference(db))
                 elif url.path == "/api/albums":
                     self.reply_json(albums(db, params.get("q", "")))
+                elif url.path == "/api/artist-library":
+                    self.reply_json(artist_library(db, params.get("artist"), int(params.get("after", 0))))
                 elif url.path == "/api/downloads":
                     self.reply_json({"items": list_downloads()})
                 elif url.path == "/api/download-review":
@@ -110,6 +113,12 @@ def serve(db, port):
                     self.body_length(0)
                     query = parse_qs(urlsplit(self.path).query, max_num_fields=1).get("q", [""])[0]
                     self.reply_json(search(db, query, kind="album", limit=None))
+                    return
+                if parts == ["api", "artist-upgrades"]:
+                    self.body_length(0)
+                    params = parse_qs(urlsplit(self.path).query, max_num_fields=2)
+                    self.reply_json(artist_upgrades(db, params.get("artist", [None])[0],
+                                                   int(params.get("after", [0])[0])))
                     return
                 if parts == ["api", "scan"]:
                     if self.body_length(0):

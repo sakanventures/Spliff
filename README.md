@@ -1,5 +1,7 @@
 # Spliff
 
+The native Mac companion is in `apple/Spliff/Spliff.xcodeproj`. It opens the dashboard inside the app and manages the background connection through the existing service operations. See [Mac companion setup](apple/README.md) for the development build and current distribution limits.
+
 Spliff is a local music catalog and lossless-upgrade review tool for macOS. It reads a mounted music folder, stores the index in SQLite, and serves a dashboard and local MCP tools. The dashboard has no playback controls.
 
 ## Start on a Mac
@@ -101,3 +103,50 @@ The graph uses the first audio stream, combined channel magnitudes, a Hann windo
 Before a Keep both or Replace destination preview is offered, every original/download pair must finish decoding and produce a spectrogram. Failure blocks the preview and leaves files untouched. Existing metadata matching, protection, exact destination confirmation, and replacement settings still apply. Analysis is read-only; results are cached in process memory by file identity, size, and modification time. Restarting Spliff clears that cache. Tracks with unknown duration or over one hour are currently unsupported. Each analysis has a two-minute timeout.
 
 MCP exposes `analyze_library_spectrum(track_id)` and, with downloads enabled, `analyze_download_spectrum(candidate_id, index=0, original_track_id=...)`. Responses contain PNG image blocks and metadata. A connected chat client receives the generated image, not audio. Search-only mode does not expose library analysis. The CLI uses the same implementation: `spliff spectrum TRACK_ID` prints JSON with metadata and a base64 PNG.
+
+## Artist-name workflow in ChatGPT
+
+Use the catalog-enabled MCP connection for requests such as **Common**. It inventories the artist's indexed music first, then searches for upgrades of the owned releases. It does not substitute a Soulseek discography for the user's collection. The artist inventory lists MP3/other formats, observed bitrates, track counts, protected tracks, album folders, and loose cuts. Disc folders are grouped into their parent release; loose files at the artist level remain tracks even when their album tags contain an album name or website.
+
+`artist_library(artist)` reads the inventory. `search_artist_upgrades(artist)` searches up to three owned releases per batch and returns up to five candidates for each. Albums appear before loose tracks. Use the returned `next` offset as `after` to review another batch when requested. Search failures and searches with no name-matching results are distinct. Protected, already lossless, and uninspected releases are not searched. Artist and release words in peer paths are conservative matching clues only. They do not verify recording identity, edition, or completeness. This version supports lossless searches; higher-bitrate MP3 fallback is still pending.
+
+If the artist is absent, select or supply the artist's exact local folder and call `index_music_folder(folder)`. This records metadata in the catalog without changing audio. Search and indexing are separate operations. After selecting a candidate, `stage_nicotine_download(candidate_id, original_track_id=RELEASE_ID)` retains the owned release's comparison for later review. Downloads still require explicit selection; library changes still require the existing review and confirmation flow.
+
+**Connection setup matters:** `mcp --search-only` deliberately exposes only remote Soulseek search. It cannot provide the artist workflow. Start the connection with the actual populated catalog and without `--search-only`, for example:
+
+```sh
+spliff --db /absolute/path/catalog.sqlite mcp --allow-downloads
+```
+
+Restart the MCP process/tunnel and refresh the custom plugin's tools. Confirm that `artist_library`, `search_artist_upgrades`, and `index_music_folder` appear before expecting a bare artist name to inspect owned music. Library paths and metadata are returned to the connected chat. The default `search_nicotine` operation on this catalog-enabled connection routes exact indexed artist names through the same artist operation. With an unindexed name, its default auto mode asks to index the folder; explicit `kind=track` or `kind=album` still supports remote discovery.
+
+The CLI calls the same operations with `spliff --db PATH artist-library Common` and `spliff --db PATH artist-upgrades Common`. The dashboard API exposes `GET /api/artist-library?artist=Common` and an explicitly requested `POST /api/artist-upgrades?artist=Common` using the existing dashboard action headers.
+
+## Background Mac services
+
+`Install-Background-Services.command` is the one-time installer for this checkout. Stop the existing Terminal tunnel with **Control+C**, then double-click the installer (or run `./Install-Background-Services.command`). It uses `artist-workflow.sqlite`, which contains the Common artist scan, for both the dashboard and MCP. Leave the project and its virtual environment at the same paths after installation.
+
+The installer creates two user login agents: `com.sakanventures.spliff.dashboard` and `com.sakanventures.spliff.tunnel`. They run after login, restart after failure, and need no Terminal window. The dashboard listens at <http://127.0.0.1:8765>. The tunnel agent supervises the MCP child, enables library tools, downloads that the user selects, and Discogs lookups, and preserves the existing tunnel ID. Nicotine+ must still be running, connected, and have Spliff Search enabled. The Mac must be awake and the music drive mounted for the corresponding operations. These are per-user login services, not pre-login system daemons.
+
+The tunnel runtime key is entered once with hidden input and saved in an owner-only file under `~/Library/Application Support/Spliff/Services`. Do not paste it into chat. Neither the plists nor source code contain the key. The original tunnel profile remains unchanged; the installer makes a service profile that references the saved key and uses the catalog-enabled MCP command. Refresh the Spliff connection tools in ChatGPT after the tunnel is ready.
+
+Use these commands from the project directory for maintenance:
+
+```sh
+.venv/bin/python -m spliff services status
+.venv/bin/python -m spliff services restart
+.venv/bin/python -m spliff services stop
+.venv/bin/python -m spliff services uninstall
+```
+
+`status` reports loaded agents, running processes, dashboard readiness, and tunnel readiness after a successful control-plane poll. Loading an agent alone does not establish that the tunnel is connected. Logs are in `~/Library/Application Support/Spliff/Services` (`dashboard.log`, `dashboard.error.log`, `tunnel.log`, `tunnel.error.log`). Uninstall retains the catalog, audio, logs, and credential. To change the saved credential, rerun install with `--replace-key`.
+
+To choose another catalog or dashboard port, run `.venv/bin/python -m spliff --db /absolute/path/catalog.sqlite services install --port 8765`. Status and restart use the saved service configuration. Installation refuses an occupied dashboard port and backs up matching existing agent files. A failure while loading the agents restores previous agent files and attempts to restart previously loaded agents. `services prepare --output background-services` generates reviewable files without installing agents or requesting a credential.
+
+### ChatGPT tool registration and selected downloads
+
+Changing local MCP code does not update an already registered ChatGPT tool schema. After restarting the Spliff tunnel's MCP child, open Spliff's plugin settings and use **Refresh tools**. The plugin's app details should show the staging, status, spectral-review, and confirmation tools. Existing conversations may still carry their original tool snapshot; test the refreshed plugin in a new conversation.
+
+With downloads enabled, `stage_nicotine_download` stages one explicitly selected candidate and returns its transfer ID in `id`. `nicotine_transfer_status` reads that ID's per-file statuses and completed-file count without running spectral analysis. `review_nicotine_download` checks completed audio and original recording matches; `analyze_download_spectrum` generates visual review evidence. After the user's separate Keep both/Replace decision, `preview_album_action` returns exact destinations and a confirmation token. Only `confirm_album_action` with that token and an explicit confirmation applies changes. Download authorization never implies authorization to replace originals.
+
+New catalog-enabled searches save peer/file fingerprints in a separate `candidate-receipts.sqlite` cache beside the catalog (up to 3,000 recent observations). `refresh_nicotine_candidate` searches the original query and compares peer, remote paths, file sizes, formats, sample rates and bit depths. A unique exact advertised match can retain an earlier explicit candidate selection. This comparison does not verify audio identity or provenance. Missing receipts or changed files require a fresh selection; old IDs from before receipt recording cannot be safely reidentified automatically. Refresh never downloads by itself.

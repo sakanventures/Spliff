@@ -1,3 +1,4 @@
+if (new URLSearchParams(location.search).get('embedded') === '1') document.documentElement.classList.add('embedded');
 const get = id => document.getElementById(id);
 const element = (tag, content, className) => {
   const node = document.createElement(tag);
@@ -135,6 +136,7 @@ async function loadReviews() {
 
 function view(page) {
   document.body.dataset.view = page;
+  window.webkit?.messageHandlers?.libraryPage?.postMessage(page);
   get('advanced').open = false;
   for (const [id, key, panel] of [['albums', 'albums', 'albums-panel'], ['browse', 'tracks', 'index'],
     ['staged', 'reviews', 'review-panel'], ['downloads', 'downloads', 'downloads-panel']]) {
@@ -226,6 +228,10 @@ function openAlbumSearch(album) {
 }
 
 function showAlbumLibrary(comparing = false) {
+  if (!comparing && window.webkit?.messageHandlers?.libraryPage) {
+    window.webkit.messageHandlers.libraryPage.postMessage('library');
+    return;
+  }
   currentAlbum = null;
   sourceRequest++;
   choosingDownloadOriginal = comparing;
@@ -752,7 +758,14 @@ async function scanMusic() {
 
 get('scan').addEventListener('click', scanMusic);
 get('add-library').addEventListener('click', scanMusic);
-view('albums');
+const initialPage = new URLSearchParams(location.search);
+const companion = Boolean(window.webkit?.messageHandlers?.libraryPage);
+if (companion) document.documentElement.classList.add('companion');
+view(companion && ['tracks', 'downloads', 'reviews'].includes(initialPage.get('page')) ? initialPage.get('page') : 'albums');
+if (companion && initialPage.get('preferences') === '1') {
+  settingsDialog.addEventListener('close', () => showAlbumLibrary(), {once: true});
+  get('open-settings').click();
+}
 
 // One graph, one track selector, one source switch. Analysis stays on this Mac.
 function spectrumViewer(container, choices, parameters) {

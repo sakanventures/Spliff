@@ -11,3 +11,6 @@ dist/
 *.db
 *.db-shm
 *.db-wal
+/background-services/
+
+xcuserdata/

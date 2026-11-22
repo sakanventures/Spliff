@@ -133,3 +133,31 @@ dialog::backdrop { background: #060906bd; }
 .spectrum-dialog { width: min(1200px, 94vw); max-width: 94vw; padding: 12px; }
 .spectrum-dialog .spectrum { margin: 0; border: 0; }
 .spectrum-close { display: block; margin-left: auto; }
+
+/* The companion already supplies the app title and native folder picker. */
+.embedded .top { display: none; }
+.embedded .hero { padding-top: 12px; }
+.embedded h1 { font-size: clamp(1.8rem, 4vw, 3rem); }
+
+/* Review surfaces share the companion's system appearance. */
+.companion {
+  color-scheme: light dark;
+  font: 13px -apple-system, system-ui, sans-serif;
+  color: CanvasText; background: Canvas;
+  --panel: Canvas; --muted: GrayText; --edge: color-mix(in srgb, CanvasText 16%, Canvas);
+  --accent: AccentColor;
+}
+.companion nav { display: none; }
+.companion main { width: 100%; padding: 12px 16px; }
+.companion #albums-panel { width: 100%; }
+.companion .hero, .companion #album-library .hero { padding: 12px 0; text-align: left; }
+.companion h1, .companion #selected-album-title { font-size: 19px; letter-spacing: normal; }
+.companion button, .companion input, .companion select { background: Field; color: FieldText; padding: 4px 8px; border-radius: 5px; font-weight: 400; }
+.companion .primary, .companion button[aria-pressed="true"] { background: Highlight; color: HighlightText; }
+.companion th { background: Canvas; }
+.companion .panel, .companion .album-list { border-radius: 3px; }
+.companion .album-list li, .companion td, .companion th { padding: 7px 10px; }
+.companion .metrics { margin-bottom: 12px; }
+.companion .metrics div { padding: 6px 10px; border: 0; }
+.companion .metrics dd { font-size: 17px; }
+.companion :focus-visible { outline-color: Highlight; }
