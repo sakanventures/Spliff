@@ -20,10 +20,13 @@ def main():
     scan_parser.add_argument("root", type=Path)
     ui = commands.add_parser("serve", help="Open the local read-only dashboard")
     ui.add_argument("--port", type=int, default=8765)
-    mcp_parser = commands.add_parser("mcp", help="Expose read-only MCP tools over stdio")
+    mcp_parser = commands.add_parser("mcp", help="Expose Spliff tools over stdio")
     mcp_parser.add_argument("--search-only", action="store_true",
                             help="Expose only Nicotine+ search to a connected chat")
+    mcp_parser.add_argument("--allow-downloads", action="store_true",
+                            help="Also expose explicitly selected downloads and review")
     installer = commands.add_parser("install-nicotine-plugin", help="Install Spliff Search for Nicotine+")
+    installer.add_argument("--upgrade", action="store_true", help="Update an existing Spliff Search plugin")
     installer.add_argument("--plugins-dir", type=Path,
                            default=Path.home() / ".local/share/nicotine/plugins")
     commands.add_parser("nicotine-status", help="Check whether the Nicotine+ bridge is available")
@@ -43,19 +46,19 @@ def main():
             print(json.dumps(scan(db, root, lambda counts: print(counts, file=sys.stderr))))
             return 0
         if args.command == "install-nicotine-plugin":
-            print(install_plugin(args.plugins_dir))
+            print(install_plugin(args.plugins_dir, upgrade=args.upgrade))
             return 0
         if args.command == "nicotine-status":
             print(json.dumps(request("status")))
             return 0
-        if args.command == "mcp" and args.search_only:
+        if args.command == "mcp" and args.search_only and not args.allow_downloads:
             mcp.serve(None, search_only=True)
             return 0
         initialize(db)
         if args.command == "serve":
             web.serve(db, args.port)
         elif args.command == "mcp":
-            mcp.serve(db)
+            mcp.serve(db, search_only=args.search_only, allow_downloads=args.allow_downloads)
         elif args.command == "stage":
             print(f"Staged review #{stage(db, args.id, args.candidate.expanduser())}")
         else:

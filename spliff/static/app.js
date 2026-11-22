@@ -44,7 +44,12 @@ function trackRow(track) {
   if (track.present && !track.error) {
     const compare = element('button', 'Compare file');
     compare.addEventListener('click', () => chooseCandidate(track));
-    actions.append(compare);
+    const match = element('button', 'Match download');
+    match.addEventListener('click', () => {
+      downloadOriginal = track;
+      view('downloads');
+    });
+    actions.append(compare, match);
   }
   row.append(name, element('td', track.album || '—'), element('td', encoding(track)), element('td', status), actions);
   return row;
@@ -114,18 +119,98 @@ async function loadReviews() {
   }
 }
 
-function view(review) {
-  get('browse').setAttribute('aria-pressed', !review);
-  get('staged').setAttribute('aria-pressed', review);
-  get('index').hidden = review;
-  get('review-panel').hidden = !review;
-  if (review) loadReviews();
+function view(page) {
+  for (const [id, key, panel] of [['browse', 'tracks', 'index'],
+    ['staged', 'reviews', 'review-panel'], ['downloads', 'downloads', 'downloads-panel']]) {
+    get(id).setAttribute('aria-pressed', page === key);
+    get(panel).hidden = page !== key;
+  }
+  if (page === 'reviews') loadReviews();
+  if (page === 'downloads') loadDownloads();
 }
+
+let downloadOriginal = null;
+let downloadRequest = 0;
+
+async function loadDownloads(selected) {
+  const request = ++downloadRequest;
+  const picker = get('download-picker');
+  const previous = selected || picker.value;
+  get('download-report').replaceChildren();
+  get('download-original').textContent = downloadOriginal
+    ? 'Compare against ' + (downloadOriginal.album || downloadOriginal.title || downloadOriginal.path) + '.'
+    : 'To compare with your library, use Match download on one original track.';
+  try {
+    const {items} = await api('/api/downloads');
+    if (request !== downloadRequest) return;
+    picker.replaceChildren(...items.map(item => {
+      const option = element('option', item.query + ' · ' + item.id.slice(-10));
+      option.value = item.id;
+      return option;
+    }));
+    if (items.some(item => item.id === previous)) picker.value = previous;
+    get('download-status').textContent = items.length ? '' : 'No staged downloads yet.';
+  } catch (error) {
+    if (request === downloadRequest) get('download-status').textContent = error.message;
+  }
+}
+
+get('queue-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const submit = form.querySelector('button');
+  submit.disabled = true;
+  const input = get('download-code');
+  get('download-status').textContent = 'Queueing the selected candidate in Nicotine+…';
+  try {
+    const result = await action('/api/downloads?' + new URLSearchParams({candidate: input.value.trim()}));
+    input.value = '';
+    await loadDownloads(result.id);
+    get('download-status').textContent = 'Staging job saved. Select Check download for progress.';
+  } catch (error) {
+    get('download-status').textContent = error.message;
+  } finally {
+    submit.disabled = false;
+  }
+});
+
+get('download-review-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  const request = ++downloadRequest;
+  const query = new URLSearchParams({candidate: get('download-picker').value});
+  if (downloadOriginal) query.set('original', downloadOriginal.id);
+  get('download-status').textContent = 'Checking downloads and inspecting completed files…';
+  get('download-report').replaceChildren();
+  try {
+    const result = await api('/api/download-review?' + query);
+    if (request !== downloadRequest) return;
+    get('download-status').textContent = result.complete + ' of ' + result.items.length + ' staged files available.';
+    const list = document.createElement('ul');
+    for (const item of result.items) {
+      const details = [item.status, item.assessment, item.audio && encoding(item.audio),
+        item.original?.protected && 'original protected'].filter(Boolean);
+      const row = element('li', item.name + ' · ' + details.join(' · '));
+      if (item.original) {
+        row.append(element('small', 'Original: ' + (item.original.title || item.original.path) +
+          ' · ' + encoding(item.original), 'muted'));
+      }
+      list.append(row);
+    }
+    const missing = result.originals_without_match.map(track => track.title || track.path);
+    const report = get('download-report');
+    report.append(list);
+    if (missing.length) report.append(element('p', 'Originals without a confident metadata match: ' + missing.join(', ')));
+  } catch (error) {
+    if (request === downloadRequest) get('download-status').textContent = error.message;
+  }
+});
+
 get('filters').addEventListener('submit', event => { event.preventDefault(); loadTracks(); });
 get('scope').addEventListener('change', () => loadTracks());
 get('more').addEventListener('click', () => loadTracks(false));
-get('browse').addEventListener('click', () => view(false));
-get('staged').addEventListener('click', () => view(true));
+get('browse').addEventListener('click', () => view('tracks'));
+get('staged').addEventListener('click', () => view('reviews'));
+get('downloads').addEventListener('click', () => view('downloads'));
 function refreshSummary() {
   api('/api/summary').then(data => {
     for (const key of ['tracks', 'lossless', 'lossy', 'protected']) get(key).textContent = data[key].toLocaleString();
@@ -179,7 +264,7 @@ async function compareFiles(files) {
     });
     dialog.close();
     notice('Saved review #' + review.id + '. Compare the original and candidate below.');
-    view(true);
+    view('reviews');
     get('staged').focus();
   } catch (error) {
     status.textContent = error.message;

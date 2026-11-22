@@ -68,3 +68,5 @@ dialog::backdrop { background: #060906bd; }
 #drop-zone.dragging { border-color: var(--accent); background: #233524; }
 #drop-zone p { margin: 0 0 12px; }
 #choose-candidate { color: #152014; background: var(--accent); }
+#download-report { padding: 0 18px 14px; overflow-wrap: anywhere; }
+#download-report li { margin-block: .5rem; }

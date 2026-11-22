@@ -58,4 +58,14 @@ The `search_nicotine` MCP tool accepts a search query, a track or album mode, an
 
 For a local MCP client, use the installed Spliff executable with arguments `mcp --search-only`. For standard ChatGPT, use the [OpenAI Secure MCP Tunnel stdio setup](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels) with the absolute Spliff executable and the same arguments as the MCP command. Use a Platform tunnel and runtime key associated with the ChatGPT workspace, then add the tunnel as a custom MCP connection in ChatGPT. The search-only command excludes the catalog tools. The dashboard stays local. Search terms go to Soulseek and candidate metadata goes to the connected chat.
 
-Try asking the connected chat to find up to three possible lossless editions of an album. This milestone supports search. Download queueing and album replacement are future additions.
+Try asking the connected chat to find up to three possible lossless editions of an album. The default ChatGPT connection exposes search. The dashboard can queue a selected result as described below.
+
+## Stage and review a search candidate
+
+Ask Spliff Search for candidate IDs. Choose the specific track or peer folder you intend to download, then paste its ID into **Downloads → Queue to staging** on the local dashboard. IDs expire after ten minutes or when Nicotine+ restarts. A repeated queue request for the same saved ID returns its existing job. Spliff queues the observed audio files, one per numbered staging subfolder, and keeps the job under `~/Library/Application Support/Spliff/Staged downloads`. Nicotine+ still manages pending transfers and its incomplete files.
+
+Use **Check download** to see available files. To compare against the library, select **Match download** on one original track, then select the job. For albums, Spliff compares with the tagged album in that track's indexed folder. It checks actual audio metadata and highlights unmatched originals and preservation flags. A possible match remains a metadata assessment.
+
+An existing bridge needs `spliff install-nicotine-plugin --upgrade` followed by toggling **Spliff Search** off and on in Nicotine+. The bridge preserves Nicotine+ transfer filters. Turn off configured post-download commands and keep the staging and incomplete folders outside indexed library roots before queueing.
+
+The ChatGPT connection can stay search-only while the dashboard handles queueing. Operators who explicitly want chat queueing can start MCP with `--allow-downloads` and refresh the custom plugin's tools. Point the MCP process at the intended catalog with `--db` before the subcommand. Downloads stay in staging for review.

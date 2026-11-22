@@ -44,14 +44,14 @@ def initialize(db):
 def signature(info):
     return info.st_size, info.st_mtime_ns, info.st_dev, info.st_ino
 
-def probe(binary, descriptor):
+def probe(binary, descriptor, timeout=30):
     result = subprocess.run(
         [binary, "-v", "error", "-protocol_whitelist", "file", "-format_whitelist",
          "mp3,flac,wav,aiff,mov,aac,ogg,ape,wv,asf,dsf,iff", "-select_streams", "a:0",
          "-show_entries", "stream=codec_name,duration,bit_rate,sample_rate,bits_per_raw_sample,bits_per_sample:"
          "stream_tags=title,artist,album:format=format_name,duration,bit_rate:format_tags=title,artist,album",
          "-of", "json", "-i", f"/dev/fd/{descriptor}"],
-        capture_output=True, check=True, timeout=30, pass_fds=(descriptor,),
+        capture_output=True, check=True, timeout=timeout, pass_fds=(descriptor,),
     )
     data = json.loads(result.stdout)
     stream = data["streams"][0]
@@ -82,13 +82,13 @@ def probe(binary, descriptor):
                 sample_rate=number("sample_rate"),
                 bits=number("bits_per_raw_sample", fallback=stream.get("bits_per_sample")))
 
-def read_audio(binary, parent_fd, name, expected):
+def read_audio(binary, parent_fd, name, expected, timeout=30):
     descriptor = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent_fd)
     try:
         info = os.fstat(descriptor)
         if not stat.S_ISREG(info.st_mode) or signature(info) != expected:
             raise ValueError("File changed during inspection")
-        metadata = probe(binary, descriptor)
+        metadata = probe(binary, descriptor, timeout)
         if signature(os.fstat(descriptor)) != expected:
             raise ValueError("File changed during inspection")
         return metadata

@@ -4,6 +4,9 @@ import logging
 import os
 import socketserver
 from pathlib import PureWindowsPath
+from concurrent.futures import Future, TimeoutError
+from time import time
+from uuid import uuid4
 from threading import Event, Thread
 
 from pynicotine import __version__
@@ -11,6 +14,7 @@ from pynicotine.events import events
 from pynicotine.pluginsystem import BasePlugin
 from pynicotine.slskmessages import FileAttribute, UserStatus
 
+from .downloads import Downloads
 from .wire import (
     FORMATS, NICOTINE_VERSION, REQUEST_BYTES, RESPONSE_BYTES, VERSION, WINDOW_SECONDS,
     encode, endpoint, read, search_term,
@@ -23,6 +27,7 @@ MAX_FILES = 240
 class Search:
     def __init__(self, query):
         self.query = query
+        self.id = uuid4().hex
         self.token = None
         self.files = {}
         self.done = Event()
@@ -57,6 +62,8 @@ class Plugin(BasePlugin):
         self.active = None
         self.bridge = None
         self.stopped = Event()
+        self.searches = {}
+        self.downloads = Downloads(self.core, self.config)
         if __version__ != NICOTINE_VERSION:
             self.log("Spliff Search supports Nicotine+ %s. Installed: %s", (NICOTINE_VERSION, __version__))
             return
@@ -98,7 +105,11 @@ class Plugin(BasePlugin):
     def request(self, request):
         operation = request.get("operation")
         if operation == "status":
-            return {"nicotine_version": __version__}
+            return {"nicotine_version": __version__, "staging": True}
+        if operation == "queue":
+            return self.on_main(self.queue, request.get("selection"), request.get("roots"))
+        if operation == "download_status":
+            return self.on_main(self.downloads.status, request.get("selection"))
         if operation != "search":
             raise ValueError("Unknown Spliff bridge operation.")
         search = Search(search_term(request.get("query")))
@@ -109,7 +120,35 @@ class Plugin(BasePlugin):
             return {"error": "Nicotine+ did not finish the search."}
         if search.error:
             return {"error": search.error}
-        return {"files": list(search.files.values()), "truncated": search.truncated}
+        return {"files": list(search.files.values()), "truncated": search.truncated,
+                "search_id": search.id}
+
+    @staticmethod
+    def on_main(operation, *arguments):
+        future = Future()
+
+        def invoke():
+            if not future.set_running_or_notify_cancel():
+                return
+            try:
+                future.set_result(operation(*arguments))
+            except (ValueError, OSError) as exc:
+                future.set_exception(exc)
+            except Exception:
+                LOG.exception("Spliff bridge action failed")
+                future.set_exception(ValueError("Nicotine+ could not complete the action."))
+
+        events.invoke_main_thread(invoke)
+        try:
+            return future.result(timeout=5)
+        except TimeoutError as exc:
+            future.cancel()
+            raise ValueError("Nicotine+ did not confirm the action. Check the staged download before retrying.") from exc
+
+    def queue(self, selection, roots):
+        if self.stopped.is_set() or self.core.users.login_status == UserStatus.OFFLINE:
+            raise ValueError("Connect Nicotine+ to Soulseek before staging a candidate.")
+        return self.downloads.queue(selection, self.searches, roots)
 
     def start(self, search):
         if search.done.is_set():
@@ -137,6 +176,10 @@ class Plugin(BasePlugin):
                 if search.token is not None:
                     self.core.search.remove_search(search.token)
         finally:
+            if error is None:
+                if len(self.searches) >= 8:
+                    del self.searches[next(iter(self.searches))]
+                self.searches[search.id] = (time(), list(search.files.values()), search.query)
             search.error = error
             search.done.set()
 
@@ -152,7 +195,9 @@ class Plugin(BasePlugin):
         if active is None:
             return
         for _code, path, size, _extension, attributes, *_unused in message.list:
-            if len(path.encode("utf-8")) > 480 or not path.isprintable() or not message.username.isprintable():
+            if (len(path.encode("utf-8")) > 480 or not path.isprintable()
+                    or len(message.username) > 64 or not message.username.isprintable()
+                    or not 0 < size <= 8 * 1024**3):
                 continue
             lower = path.lower()
             if (not all(word in lower for word in active.included_words)
@@ -168,7 +213,7 @@ class Plugin(BasePlugin):
                 search.truncated = True
                 break
             search.files[key] = {
-                "peer": message.username[:64], "path": path, "format": extension, "bytes": size,
+                "peer": message.username, "path": path, "format": extension, "bytes": size,
                 "free_slot": bool(message.freeulslots),
                 "queue": 0 if message.freeulslots else message.inqueue or None,
                 "seconds": attributes.get(FileAttribute.DURATION),

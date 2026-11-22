@@ -27,6 +27,7 @@
     <nav aria-label="Catalog views">
       <button id="browse" aria-pressed="true">Track index</button>
       <button id="staged" aria-pressed="false">Staged reviews</button>
+      <button id="downloads" aria-pressed="false">Downloads</button>
     </nav>
     <section id="index" aria-label="Track index" class="panel">
       <form id="filters">
@@ -50,6 +51,20 @@
     <section id="review-panel" aria-label="Staged reviews" class="panel" hidden>
       <div id="reviews"></div>
       <p class="message" id="review-status" role="status"></p>
+    </section>
+    <section id="downloads-panel" aria-label="Staged downloads" class="panel" hidden>
+      <form id="queue-form">
+        <label>Candidate ID from Spliff Search<input id="download-code" required maxlength="48"
+          placeholder="Paste the selected candidate ID"></label>
+        <button type="submit">Queue to staging</button>
+      </form>
+      <form id="download-review-form">
+        <label>Staged download<select id="download-picker" required></select></label>
+        <button type="submit">Check download</button>
+      </form>
+      <p class="message" id="download-original"></p>
+      <p class="message" id="download-status" role="status"></p>
+      <div id="download-report"></div>
     </section>
     <dialog id="candidate-dialog" aria-labelledby="candidate-heading">
       <div class="dialog-heading">

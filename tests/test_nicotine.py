@@ -74,6 +74,7 @@ class NicotineSearch(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             target = nicotine.install_plugin(Path(directory))
             self.assertEqual({item.name for item in target.iterdir()},
-                             {"__init__.py", "plugin.py", "wire.py", "PLUGININFO"})
-            with self.assertRaises(FileExistsError):
+                             {"__init__.py", "plugin.py", "downloads.py", "wire.py", "PLUGININFO"})
+            with self.assertRaisesRegex(ValueError, "already exists"):
                 nicotine.install_plugin(Path(directory))
+            self.assertEqual(nicotine.install_plugin(Path(directory), upgrade=True), target)

@@ -3,23 +3,39 @@ import shutil
 import socket
 from collections import defaultdict
 from pathlib import Path, PureWindowsPath
+from tempfile import TemporaryDirectory
 
 from .nicotine_bridge.wire import (
+    album_key, track_stem,
     REQUEST_BYTES, RESPONSE_BYTES, VERSION, WINDOW_SECONDS, encode, endpoint, read, search_term,
 )
 
 
-def install_plugin(plugins):
-    """Install the packaged bridge without replacing another installed plugin."""
+def install_plugin(plugins, upgrade=False):
+    """Install the packaged bridge, upgrading only a known Spliff installation."""
     target = plugins.expanduser() / "spliff_search"
     source = Path(__file__).with_name("nicotine_bridge")
-    target.mkdir(parents=True)
-    try:
-        for name in ("wire.py", "plugin.py", "PLUGININFO", "entrypoint.py"):
-            shutil.copyfile(source / name, target / ("__init__.py" if name == "entrypoint.py" else name))
-    except OSError:
-        shutil.rmtree(target)
-        raise
+    target.parent.mkdir(parents=True, exist_ok=True)
+    existing = target.exists() or target.is_symlink()
+    if existing:
+        info = target / "PLUGININFO"
+        if (not upgrade or target.is_symlink() or not info.is_file()
+                or 'Name = "Spliff Search"' not in info.read_text(encoding="utf-8")):
+            raise ValueError("A plugin already exists at this destination. Use --upgrade only for Spliff Search.")
+    with TemporaryDirectory(prefix=".spliff-install-", dir=target.parent) as staging:
+        prepared = Path(staging) / "new"
+        prepared.mkdir()
+        for name in ("wire.py", "plugin.py", "downloads.py", "PLUGININFO", "entrypoint.py"):
+            shutil.copyfile(source / name, prepared / ("__init__.py" if name == "entrypoint.py" else name))
+        previous = Path(staging) / "previous"
+        if existing:
+            target.rename(previous)
+        try:
+            prepared.rename(target)
+        except OSError:
+            if existing:
+                previous.rename(target)
+            raise
     return target
 
 
@@ -50,17 +66,19 @@ def availability(candidate):
     return not candidate["free_slot"], queue if queue is not None else float("inf")
 
 
-def album_folders(files):
+def album_folders(files, search_id=None):
     groups = defaultdict(list)
-    for file in files:
-        path = PureWindowsPath(file["path"])
-        groups[(file["peer"], str(path.parent))].append(file)
+    for index, file in enumerate(files):
+        groups[album_key(file)].append((index, file))
     candidates = []
-    for (peer, folder), entries in groups.items():
+    for (peer, folder), indexed in groups.items():
+        index = indexed[0][0]
+        entries = [file for _, file in indexed]
         names = {PureWindowsPath(file["path"]).name for file in entries}
-        stems = {PureWindowsPath(name).stem.casefold() for name in names}
+        stems = {track_stem(file) for file in entries}
         candidates.append({
             "peer": peer, "folder": folder, "matching_files": len(stems),
+            **({"candidate_id": f"album-{search_id}-{index}"} if search_id else {}),
             "formats": sorted({file["format"] for file in entries}),
             "free_slot": entries[0]["free_slot"], "queue": entries[0]["queue"],
             "filenames": sorted(names, key=lambda name: (name.casefold(), name))[:40],
@@ -76,10 +94,14 @@ def search(_db, query=None, kind="track", limit=3):
         raise ValueError("Choose between 1 and 10 candidates.")
     response = request("search", query=query)
     files = response["files"]
+    search_id = response.get("search_id")
     if kind == "album":
-        candidates = album_folders(files)
+        candidates = album_folders(files, search_id)
     else:
-        candidates = sorted(files, key=availability)
+        candidates = sorted(
+            (dict(file, candidate_id=f"track-{search_id}-{index}") if search_id else file
+             for index, file in enumerate(files)), key=availability,
+        )
     return {
         "query": query, "kind": kind, "candidates": candidates[:limit],
         "observed_matches": len(candidates), "search_window_seconds": WINDOW_SECONDS,

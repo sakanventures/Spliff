@@ -11,6 +11,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 from .catalog import stats, tracks
 from .review import protect, reviews, stage
 from .scanner import scan
+from .staged_downloads import list_downloads, queue, review_download
 
 MAX_CANDIDATE_BYTES = 512 * 1024 * 1024
 STATIC = Path(__file__).with_name("static")
@@ -35,14 +36,22 @@ def serve(db, port):
                                            after=int(params.get("after", 0))))
                 elif url.path == "/api/summary":
                     self.reply_json(stats(db))
+                elif url.path == "/api/downloads":
+                    self.reply_json({"items": list_downloads()})
+                elif url.path == "/api/download-review":
+                    original = int(params["original"]) if params.get("original") else None
+                    try:
+                        self.reply_json(review_download(db, params.get("candidate"), original))
+                    except ValueError as exc:
+                        self.reply_json({"error": str(exc)}, 400)
                 elif url.path == "/api/reviews":
                     self.reply_json({"items": reviews(db)})
                 else:
                     self.send_error(404)
             except ValueError:
                 self.reply_json({"error": "Invalid search parameters"}, 400)
-            except sqlite3.Error:
-                self.reply_json({"error": "Catalog unavailable"}, 503)
+            except (OSError, sqlite3.Error):
+                self.reply_json({"error": "Catalog or staging unavailable"}, 503)
 
         def do_POST(self):
             host = f"127.0.0.1:{server.server_port}"
@@ -52,6 +61,11 @@ def serve(db, port):
                 return
             try:
                 parts = urlsplit(self.path).path.strip("/").split("/")
+                if parts == ["api", "downloads"]:
+                    self.body_length(0)
+                    selection = parse_qs(urlsplit(self.path).query, max_num_fields=1).get("candidate", [None])[0]
+                    self.reply_json(queue(db, selection), 201)
+                    return
                 if parts == ["api", "scan"]:
                     if self.body_length(0):
                         raise ValueError("Unexpected scan data.")

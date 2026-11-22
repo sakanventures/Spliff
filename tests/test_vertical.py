@@ -6,7 +6,10 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
+from time import time
+from types import SimpleNamespace
+from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 from urllib.parse import quote
@@ -14,6 +17,8 @@ from urllib.parse import quote
 from spliff.catalog import stats, tracks
 from spliff.review import protect, reviews, stage
 from spliff.scanner import scan
+from spliff.nicotine_bridge.downloads import Downloads
+from spliff.staged_downloads import review_download
 
 @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "Requires FFmpeg")
 class VerticalSlice(unittest.TestCase):
@@ -69,6 +74,63 @@ class VerticalSlice(unittest.TestCase):
         with self.assertRaises(ValueError):
             scan(never, self.root)
         self.assertFalse(never.parent.exists())
+
+    def test_download_job_is_idempotent_and_compares_only_staged_audio(self):
+        scan(self.db, self.root)
+        root = self.base.resolve() / "staging"
+        incomplete = self.base / "incomplete"
+        indexed = tracks(self.db)["items"][0]
+        protect(self.db, indexed["id"], True)
+        staged_bytes = self.candidate.read_bytes()
+        original_bytes = self.original.read_bytes()
+        queued = []
+
+        def enqueue(peer, remote, folder_path, size):
+            queued.append((peer, remote))
+            transfers[peer + remote] = SimpleNamespace(folder_path=folder_path, status="Queued")
+
+        def completed(_peer, remote, size, folder):
+            path = Path(folder) / PureWindowsPath(remote).name
+            return str(path), path.is_file() and path.stat().st_size == size
+
+        transfers = {}
+        core = SimpleNamespace(downloads=SimpleNamespace(
+            transfers=transfers, enqueue_download=enqueue, get_complete_download_file_path=completed,
+            get_incomplete_download_folder=lambda: str(incomplete),
+        ))
+        config = SimpleNamespace(sections={"transfers": {"afterfinish": "", "afterfolder": ""}})
+        bridge = Downloads(core, config)
+        identifier = "a" * 32
+        selection = f"album-{identifier}-0"
+        flac = {"peer": "test", "path": r"Artist\Album\01.flac", "format": "flac", "bytes": len(staged_bytes)}
+        duplicate = dict(flac, path=r"Artist\Album\01.wav", format="wav")
+        searches = {identifier: (time(), [flac, duplicate], "Example Artist")}
+        with patch("spliff.nicotine_bridge.downloads.staging_root", return_value=root):
+            with self.assertRaisesRegex(ValueError, "outside indexed"):
+                bridge.queue(selection, searches, [str(self.base)])
+            self.assertEqual(queued, [])
+            with self.assertRaisesRegex(ValueError, "expired"):
+                bridge.queue(selection, {identifier: (time() - 601, [flac], "Example")}, [])
+            job = bridge.queue(selection, searches, [str(self.root)])
+            self.assertEqual(job["complete"], 0)
+            self.assertEqual(job["items"][0]["status"], "Queued")
+            self.assertEqual(len(queued), 1)
+            self.assertEqual(bridge.queue(selection, {}, [str(self.root)]), job)
+            self.assertEqual(len(queued), 1)
+            folder = root / selection / "001"
+            (folder / "01.flac").write_bytes(staged_bytes)
+            transfers.clear()  # Nicotine+ can auto-clear completed transfers.
+            with patch("spliff.staged_downloads.staging_root", return_value=root), patch(
+                    "spliff.staged_downloads.request", side_effect=lambda operation, **args: bridge.status(args["selection"])):
+                # The selected original is a single-track comparison here because its album tag is empty.
+                report = review_download(self.db, selection, indexed["id"])
+            self.assertEqual(report["complete"], 1)
+            self.assertEqual(report["items"][0]["audio"]["codec"], "flac")
+            self.assertNotIn("file", report["items"][0])
+            self.assertTrue(report["items"][0]["original"]["protected"])
+            self.assertEqual(report["items"][0]["assessment"], "check release tags")
+            self.assertEqual(self.original.read_bytes(), original_bytes)
+            self.assertEqual(self.candidate.read_bytes(), staged_bytes)
 
     def test_mcp_and_http(self):
         scan(self.db, self.root)
