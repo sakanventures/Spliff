@@ -14,11 +14,21 @@ from .nicotine_bridge.downloads import SELECTION, read_job, selection_parts
 from .nicotine_bridge.wire import staging_root
 
 
-def queue(db, candidate_id=None):
-    selection_parts(candidate_id)
+def queue(db, candidate_id=None, *, original_id=None):
+    kind, _, _ = selection_parts(candidate_id)
+    if original_id is not None:
+        indexed = originals(db, original_id, kind)
+        if kind != "album" or not indexed[0]["album"]:
+            raise ValueError("Choose an indexed album to compare.")
     with closing(connect(db)) as connection:
         roots = [row["path"] for row in connection.execute("SELECT path FROM roots")]
     result = request("queue", selection=candidate_id, roots=roots)
+    if original_id is not None:
+        with closing(connect(db)) as connection, connection:
+            connection.execute("""
+                INSERT INTO download_comparisons(candidate, original_id) VALUES (?, ?)
+                ON CONFLICT(candidate) DO UPDATE SET original_id=excluded.original_id
+            """, (candidate_id, original_id))
     return public_status(result)
 
 
@@ -109,7 +119,7 @@ def originals(db, track_id, kind):
         if kind == "track" or not row["album"]:
             return [{key: row[key] for key in row.keys() if key != "root"}]
         siblings = connection.execute(f"""
-            SELECT {fields} FROM tracks WHERE root=? AND album=? AND present=1 AND error IS NULL
+            SELECT {fields} FROM tracks WHERE root=? AND album=? COLLATE NOCASE AND present=1 AND error IS NULL
             ORDER BY path
         """, (row["root"], row["album"])).fetchall()
     folder = Path(row["path"]).parent
@@ -190,13 +200,21 @@ def suggest_album(db, items):
 def review_download(db, candidate_id=None, original_track_id=None, *, include_sources=False):
     selection_parts(candidate_id)
     result = request("download_status", selection=candidate_id)
-    indexed = originals(db, original_track_id, result["kind"])
     directory = staging_root() / candidate_id
     binary = find_probe() if result["complete"] else None
     report = public_status(result)
     with closing(connect(db)) as connection:
-        kept = connection.execute("SELECT destination FROM kept_albums WHERE candidate=?",
+        kept = connection.execute("SELECT destination,mode FROM kept_albums WHERE candidate=?",
                                   (candidate_id,)).fetchone()
+        if original_track_id is None and not kept:
+            selected = connection.execute("""
+                SELECT tracks.id FROM download_comparisons
+                JOIN tracks ON tracks.id=download_comparisons.original_id
+                WHERE candidate=? AND tracks.present=1 AND tracks.error IS NULL
+            """, (candidate_id,)).fetchone()
+            if selected:
+                original_track_id = selected["id"]
+    indexed = originals(db, original_track_id, result["kind"])
     report["kept_both"] = dict(kept) if kept else None
     possible = set()
     deadline = monotonic() + 35

@@ -62,9 +62,11 @@ Try asking the connected chat to find up to three possible lossless editions of 
 
 ## Stage and review a search candidate
 
-Ask Spliff Search for candidate IDs. Choose the specific track or peer folder you intend to download, then paste its ID into **Downloads → Queue to staging** on the local dashboard. IDs expire after ten minutes or when Nicotine+ restarts. A repeated queue request for the same saved ID returns its existing job. Spliff queues the observed audio files, one per numbered staging subfolder, and keeps the job under `~/Library/Application Support/Spliff/Staged downloads`. Nicotine+ still manages pending transfers and its incomplete files.
+On the local dashboard, choose a music folder or an album folder to scan. Spliff remembers the scan. Find an MP3 album under **Albums**, click **Find FLACs**, and choose a source to download. Spliff remembers which indexed album you chose for the comparison.
 
-Open **Downloads** and select the album by title and peer. A download appears automatically when every selected file has finished. Nicotine+ shows pending or failed transfers. Spliff suggests the matching indexed album when one edition fits the downloaded metadata. Use **Change original** to find and select a different indexed album. It checks actual audio metadata and highlights unmatched originals and preservation flags. A possible match remains a metadata assessment.
+You can also paste a candidate ID from Spliff Search under **Downloads → Add from chat**. IDs expire after ten minutes or when Nicotine+ restarts. A repeated queue request for the same saved ID returns its existing job. Spliff queues the observed audio files, one per numbered staging subfolder, and keeps the job under `~/Library/Application Support/Spliff/Staged downloads`. Nicotine+ manages pending and failed transfers.
+
+A download appears when every selected file has finished. Spliff shows the album comparison first, with unmatched originals and preservation flags under **Track details**. For a download queued from chat, Spliff suggests an indexed album when one edition fits the tags. **Choose comparison album** selects a different edition. **Advanced** opens the track index and individual staged reviews.
 
 An existing bridge needs `spliff install-nicotine-plugin --upgrade` followed by toggling **Spliff Search** off and on in Nicotine+. The bridge preserves Nicotine+ transfer filters. Turn off configured post-download commands and keep the staging and incomplete folders outside indexed library roots before queueing.
 
@@ -72,6 +74,6 @@ The ChatGPT connection can stay search-only while the dashboard handles queueing
 
 ### Keep both versions
 
-For an album with a complete one-to-one FLAC match against unprotected MP3 originals, click **Keep both**. The confirmation shows the exact album directory and its `MP3` subfolder before applying the change.
+For an album with a complete one-to-one FLAC match against unprotected MP3 originals, click **Use FLACs** and choose **Keep both** or **Replace**. Either choice leads to a destination preview and a separate confirmation.
 
-Spliff copies the staged FLACs into the album directory and moves the original MP3s into `MP3`, preserving their indexed IDs. Staged files remain available. Existing destinations and protected originals block the operation. If the Mac loses power during the operation, a hidden `.spliff-keep-both` directory in the album folder can contain the recovery plan. Review it before retrying.
+Spliff copies the staged FLACs into the album directory. **Keep both** moves the MP3s into `MP3`, preserving their indexed IDs. **Replace** keeps the originals in a hidden `.spliff-originals` recovery folder and shows only the FLACs in the active catalog. Once the saved FLACs pass byte-for-byte verification and the catalog update succeeds, Spliff removes the matching audio files from its Nicotine+ staging folder. Existing destinations and protected originals block the operation. If the Mac loses power during the operation, a hidden `.spliff-keep-both` directory in the album folder can contain the recovery plan. Review it before retrying.

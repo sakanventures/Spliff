@@ -13,23 +13,59 @@
     <button id="scan">Scan a folder</button>
   </header>
   <main>
-    <section class="hero">
-      <h1>Music library</h1>
-      <p>Browse your collection and compare staged lossless candidates.</p>
-    </section>
     <p id="action-status" class="message" role="status" hidden></p>
-    <dl class="metrics">
-      <div><dt>Indexed tracks</dt><dd id="tracks">–</dd></div>
-      <div><dt>Lossless</dt><dd id="lossless">–</dd></div>
-      <div><dt>Lossy</dt><dd id="lossy">–</dd></div>
-      <div><dt>Protected</dt><dd id="protected">–</dd></div>
-    </dl>
-    <nav aria-label="Catalog views">
-      <button id="browse" aria-pressed="true">Track index</button>
-      <button id="staged" aria-pressed="false">Staged reviews</button>
+    <nav aria-label="Spliff views">
+      <button id="albums" aria-pressed="true">Albums</button>
       <button id="downloads" aria-pressed="false">Downloads</button>
+      <details id="advanced">
+        <summary>Advanced</summary>
+        <div class="advanced-menu">
+          <button id="browse" aria-pressed="false">Track index</button>
+          <button id="staged" aria-pressed="false">Staged reviews</button>
+        </div>
+      </details>
     </nav>
-    <section id="index" aria-label="Track index" class="panel">
+    <section id="albums-panel" aria-label="Albums">
+      <div id="album-library">
+        <div class="hero">
+          <h1 id="albums-heading">What album do you want to upgrade?</h1>
+        </div>
+        <form id="album-filter" class="album-filter" hidden>
+          <label><span class="visually-hidden">Find an album in your library</span>
+            <input id="album-query" type="search" maxlength="300" placeholder="Find an album in your library">
+          </label>
+          <button type="submit">Find album</button>
+        </form>
+        <div id="library-empty" class="panel library-empty" hidden>
+          <h2>Add your music</h2>
+          <p>Choose a music folder or a single album folder. Spliff remembers what it scans.</p>
+          <button id="add-library" type="button" class="primary">Choose folder</button>
+        </div>
+        <p id="album-status" role="status"></p>
+        <ul id="album-list" class="album-list"></ul>
+      </div>
+      <div id="album-search" hidden>
+        <button id="album-back" type="button">Back to albums</button>
+        <div class="hero">
+          <h2 id="selected-album-title"></h2>
+          <p id="selected-album-info"></p>
+        </div>
+        <p id="soulseek-status" role="status"></p>
+        <ul id="soulseek-results" class="album-list"></ul>
+        <form id="soulseek-form" class="album-filter">
+          <label>Nicotine+ search<input id="soulseek-query" type="search" maxlength="180" minlength="2" required></label>
+          <button id="search-soulseek" type="submit">Find FLACs</button>
+        </form>
+      </div>
+    </section>
+    <section id="index" aria-label="Track index" hidden>
+      <dl class="metrics">
+        <div><dt>Indexed tracks</dt><dd id="tracks">–</dd></div>
+        <div><dt>Lossless</dt><dd id="lossless">–</dd></div>
+        <div><dt>Lossy</dt><dd id="lossy">–</dd></div>
+        <div><dt>Protected</dt><dd id="protected">–</dd></div>
+      </dl>
+      <div class="panel">
       <form id="filters">
         <label>Search<input id="search" type="search" maxlength="300" placeholder="Artist, album, track, or path"></label>
         <label>Filter<select id="scope">
@@ -47,6 +83,7 @@
       </div>
       <p class="message" id="status" role="status">Loading catalog…</p>
       <button class="more" id="more" hidden>Load more</button>
+      </div>
     </section>
     <section id="review-panel" aria-label="Staged reviews" class="panel" hidden>
       <div id="reviews"></div>
@@ -82,10 +119,14 @@
             <div><small>Compare with your library</small><strong id="download-original"></strong></div>
             <div class="comparison-actions">
               <button id="choose-original" type="button">Choose comparison album</button>
-              <button id="keep-both" class="primary" type="button" hidden>Keep both</button>
+              <button id="keep-both" class="primary" type="button" hidden>Use FLACs</button>
             </div>
           </div>
-          <div id="download-report"></div>
+          <p id="download-note" class="muted" hidden></p>
+          <details id="download-details" hidden>
+            <summary>Track details</summary>
+            <div id="download-report"></div>
+          </details>
         </div>
       </div>
     </section>
@@ -104,17 +145,31 @@
     </dialog>
     <dialog id="keep-both-dialog" aria-labelledby="keep-both-heading">
       <div class="dialog-heading">
-        <h2 id="keep-both-heading">Keep both versions</h2>
+        <h2 id="keep-both-heading">Use the FLAC album</h2>
       </div>
-      <p id="keep-both-summary"></p>
-      <dl class="keep-destinations">
-        <div><dt>FLAC copies</dt><dd id="flac-destination"></dd></div>
-        <div><dt>Original MP3s</dt><dd id="mp3-destination"></dd></div>
-      </dl>
-      <p id="keep-both-status" role="status"></p>
-      <div class="dialog-actions">
-        <button id="cancel-keep-both" type="button">Cancel</button>
-        <button id="confirm-keep-both" class="primary" type="button" disabled>Keep both</button>
+      <div id="album-actions-description">
+        <p><strong>Keep both</strong> moves the MP3s into a visible <code>MP3</code> subfolder.</p>
+        <p><strong>Replace</strong> shows only the FLACs in Spliff and saves the original MP3s in a recovery folder.</p>
+      </div>
+      <div id="album-action-preview" hidden>
+        <p id="keep-both-summary"></p>
+        <dl class="keep-destinations">
+          <div><dt>FLAC copies</dt><dd id="flac-destination"></dd></div>
+          <div><dt>Original MP3s</dt><dd id="mp3-destination"></dd></div>
+        </dl>
+        <p>The Nicotine+ download copy is removed after Spliff verifies the saved FLACs.</p>
+        <p id="keep-both-status" role="status"></p>
+      </div>
+      <div class="album-dialog-footer">
+        <button id="cancel-keep-both" type="button" autofocus>Cancel</button>
+        <div id="album-action-choices" class="dialog-actions">
+          <button id="choose-keep-both" type="button">Keep both</button>
+          <button id="choose-replace" class="primary" type="button">Replace</button>
+        </div>
+        <div id="album-action-confirmation" class="dialog-actions" hidden>
+          <button id="back-to-album-actions" type="button">Back</button>
+          <button id="confirm-keep-both" class="primary" type="button" disabled>Confirm</button>
+        </div>
       </div>
     </dialog>
   </main>

@@ -8,8 +8,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
 
-from .catalog import stats, tracks
+from .catalog import albums, stats, tracks
 from . import keep_both
+from .nicotine import search
 from .review import protect, reviews, stage
 from .scanner import scan
 from .staged_downloads import list_downloads, queue, review_download
@@ -37,6 +38,8 @@ def serve(db, port):
                                            after=int(params.get("after", 0))))
                 elif url.path == "/api/summary":
                     self.reply_json(stats(db))
+                elif url.path == "/api/albums":
+                    self.reply_json(albums(db, params.get("q", "")))
                 elif url.path == "/api/downloads":
                     self.reply_json({"items": list_downloads()})
                 elif url.path == "/api/download-review":
@@ -47,7 +50,8 @@ def serve(db, port):
                         self.reply_json({"error": str(exc)}, 400)
                 elif url.path == "/api/keep-both":
                     try:
-                        self.reply_json(keep_both.preview(db, params.get("candidate"), int(params.get("original", 0))))
+                        self.reply_json(keep_both.preview(db, params.get("candidate"), int(params.get("original", 0)),
+                                                          params.get("mode", "keep")))
                     except (FileNotFoundError, ValueError) as exc:
                         self.reply_json({"error": str(exc)}, 400)
                 elif url.path == "/api/reviews":
@@ -69,16 +73,24 @@ def serve(db, port):
                 parts = urlsplit(self.path).path.strip("/").split("/")
                 if parts == ["api", "keep-both"]:
                     self.body_length(0)
-                    params = parse_qs(urlsplit(self.path).query, max_num_fields=3)
+                    params = parse_qs(urlsplit(self.path).query, max_num_fields=4)
                     self.reply_json(keep_both.apply(
                         db, params.get("candidate", [None])[0],
                         int(params.get("original", [0])[0]), params.get("token", [None])[0],
+                        params.get("mode", ["keep"])[0],
                     ))
                     return
                 if parts == ["api", "downloads"]:
                     self.body_length(0)
-                    selection = parse_qs(urlsplit(self.path).query, max_num_fields=1).get("candidate", [None])[0]
-                    self.reply_json(queue(db, selection), 201)
+                    params = parse_qs(urlsplit(self.path).query, max_num_fields=2)
+                    selection = params.get("candidate", [None])[0]
+                    original = params.get("original", [None])[0]
+                    self.reply_json(queue(db, selection, original_id=int(original) if original else None), 201)
+                    return
+                if parts == ["api", "album-search"]:
+                    self.body_length(0)
+                    query = parse_qs(urlsplit(self.path).query, max_num_fields=1).get("q", [""])[0]
+                    self.reply_json(search(db, query, kind="album", limit=10))
                     return
                 if parts == ["api", "scan"]:
                     if self.body_length(0):

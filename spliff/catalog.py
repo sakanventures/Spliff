@@ -26,7 +26,10 @@ CREATE INDEX IF NOT EXISTS tracks_album ON tracks(album COLLATE NOCASE, present)
 CREATE INDEX IF NOT EXISTS tracks_review ON tracks(present,quality,protected,id);
 CREATE TABLE IF NOT EXISTS kept_albums(
  candidate TEXT PRIMARY KEY, destination TEXT NOT NULL,
+ mode TEXT NOT NULL DEFAULT 'keep',
  created TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE IF NOT EXISTS download_comparisons(
+ candidate TEXT PRIMARY KEY, original_id INTEGER NOT NULL REFERENCES tracks(id));
 CREATE TABLE IF NOT EXISTS reviews(
  id INTEGER PRIMARY KEY, original_id INTEGER NOT NULL REFERENCES tracks(id),
  candidate TEXT NOT NULL, snapshot TEXT NOT NULL, original_snapshot TEXT NOT NULL,
@@ -44,6 +47,11 @@ def initialize(db):
     with closing(connect(db)) as connection:
         connection.execute("PRAGMA journal_mode=WAL")
         connection.executescript(SCHEMA)
+        with connection:
+            connection.execute("BEGIN IMMEDIATE")
+            columns = {row["name"] for row in connection.execute("PRAGMA table_info(kept_albums)")}
+            if "mode" not in columns:
+                connection.execute("ALTER TABLE kept_albums ADD COLUMN mode TEXT NOT NULL DEFAULT 'keep'")
 
 def signature(info):
     return info.st_size, info.st_mtime_ns, info.st_dev, info.st_ino
@@ -105,6 +113,32 @@ def find_probe():
         raise ValueError("ffprobe is required. Install FFmpeg and add it to PATH.")
     return binary
 
+
+def contains_pattern(query):
+    return "%" + query.replace("!", "!!").replace("%", "!%").replace("_", "!_") + "%"
+
+
+def albums(db, query=""):
+    if not isinstance(query, str) or len(query) > 300:
+        raise ValueError("Invalid album search")
+    pattern = contains_pattern(query.strip())
+    with closing(connect(db)) as connection:
+        connection.create_function("album_folder", 1, lambda path: path.rpartition("/")[0])
+        rows = connection.execute("""
+            SELECT min(id) AS id, root, album, min(nullif(artist,'')) AS artist, album_folder(path) AS folder,
+                   count(*) AS total, sum(codec='mp3') AS mp3, sum(protected) AS protected
+            FROM tracks
+            WHERE present=1 AND error IS NULL AND nullif(trim(album),'') IS NOT NULL
+            GROUP BY root, album COLLATE NOCASE, album_folder(path)
+            HAVING sum(codec='mp3') > 0 AND (album LIKE ? ESCAPE '!'
+                OR max(coalesce(artist,'') LIKE ? ESCAPE '!') OR folder LIKE ? ESCAPE '!')
+            ORDER BY album COLLATE NOCASE, id
+            LIMIT 26
+        """, (pattern, pattern, pattern)).fetchall()
+        has_library = bool(connection.execute("SELECT 1 FROM roots LIMIT 1").fetchone())
+    return {"items": [dict(row) for row in rows[:25]], "more": len(rows) > 25, "has_library": has_library}
+
+
 def tracks(db, query="", scope="all", limit=40, after=0):
     if scope not in ("all", "lossy", "lossless", "protected", "errors", "missing"):
         raise ValueError("Unknown library filter")
@@ -115,7 +149,7 @@ def tracks(db, query="", scope="all", limit=40, after=0):
                   "lossless": "present=1 AND quality='lossless' AND error IS NULL",
                   "protected": "protected=1", "errors": "present=1 AND error IS NOT NULL",
                   "missing": "present=0"}
-    phrase = "%" + query.replace("!", "!!").replace("%", "!%").replace("_", "!_") + "%"
+    phrase = contains_pattern(query)
     with closing(connect(db)) as connection:
         rows = connection.execute(f"""
             SELECT id,path,title,artist,album,codec,format,quality,duration,bitrate,

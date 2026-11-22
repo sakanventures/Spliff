@@ -6,7 +6,7 @@ from pathlib import Path, PureWindowsPath
 from tempfile import TemporaryDirectory
 
 from .nicotine_bridge.wire import (
-    album_key, track_stem,
+    album_key, album_tracks, track_stem,
     REQUEST_BYTES, RESPONSE_BYTES, VERSION, WINDOW_SECONDS, encode, endpoint, read, search_term,
 )
 
@@ -74,12 +74,14 @@ def album_folders(files, search_id=None):
     for (peer, folder), indexed in groups.items():
         index = indexed[0][0]
         entries = [file for _, file in indexed]
+        selected = album_tracks(entries, entries[0])
         names = {PureWindowsPath(file["path"]).name for file in entries}
         stems = {track_stem(file) for file in entries}
         candidates.append({
             "peer": peer, "folder": folder, "matching_files": len(stems),
             **({"candidate_id": f"album-{search_id}-{index}"} if search_id else {}),
             "formats": sorted({file["format"] for file in entries}),
+            "flac_files": sum(file["format"] == "flac" for file in selected),
             "free_slot": entries[0]["free_slot"], "queue": entries[0]["queue"],
             "filenames": sorted(names, key=lambda name: (name.casefold(), name))[:40],
         })

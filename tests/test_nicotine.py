@@ -60,7 +60,9 @@ class NicotineSearch(unittest.TestCase):
         self.assertTrue(tools[0]["annotations"]["openWorldHint"])
         result = json.loads(call["result"]["content"][0]["text"])
         self.assertEqual(result["candidates"][0]["matching_files"], 2)
+        self.assertEqual(result["candidates"][0]["flac_files"], 2)
         self.assertEqual(result["candidates"][1]["formats"], ["wav"])
+        self.assertEqual(result["candidates"][1]["flac_files"], 0)
 
     def test_missing_bridge_and_input_validation(self):
         with tempfile.TemporaryDirectory(dir="/tmp") as directory:

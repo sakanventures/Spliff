@@ -8,14 +8,17 @@ import shutil
 import stat
 import sys
 import unicodedata
-from contextlib import closing
+from contextlib import ExitStack, closing
 from pathlib import Path
 
 from .catalog import connect, signature
+from .nicotine_bridge.downloads import selection_parts
+from .nicotine_bridge.wire import staging_root
 from .scanner import AUDIO_FIELDS
 from .staged_downloads import review_download
 
 WORK_DIR = ".spliff-keep-both"
+ARCHIVES = {"keep": "MP3", "replace": ".spliff-originals"}
 
 
 def path_fingerprint(path):
@@ -27,18 +30,20 @@ def path_fingerprint(path):
     return signature(info)
 
 
-def get_plan(db, candidate, original):
+def get_plan(db, candidate, original, mode="keep"):
+    if mode not in ARCHIVES:
+        raise ValueError("Choose Keep both or Replace.")
     if sys.platform != "darwin":
         raise ValueError("Keep both currently requires macOS.")
     review = review_download(db, candidate, original, include_sources=True)
     if review["kept_both"]:
-        raise ValueError("Both versions have already been saved for this download.")
+        raise ValueError("This album has already been updated from this download.")
     items = review["items"]
     if (review["kind"] != "album" or not items or review["complete"] != len(items)
             or review["originals_without_match"]
             or any(item.get("assessment") != "possible match"
                    or item.get("audio", {}).get("codec") != "flac" for item in items)):
-        raise ValueError("Keep both requires a complete FLAC album with one metadata match per original.")
+        raise ValueError("A complete FLAC album with one metadata match per original is required.")
     pairs = []
     root = folder = None
     with closing(connect(db)) as connection:
@@ -49,7 +54,7 @@ def get_plan(db, candidate, original):
                 WHERE t.id=? AND t.present=1 AND t.error IS NULL
             """, (item["original"]["id"],)).fetchone()
             if not track or track["codec"] != "mp3" or track["protected"]:
-                raise ValueError("Keep both requires unprotected MP3 originals. Protected files stay in place.")
+                raise ValueError("Protected originals stay in place. This action requires unprotected MP3s.")
             track_root = Path(track["root"])
             mp3 = track_root / track["path"]
             if folder is None:
@@ -69,7 +74,7 @@ def get_plan(db, candidate, original):
                           "flac": str(staged), "flac_sig": item["fingerprint"],
                           "name": mp3.with_suffix(".flac").name, "audio": item["audio"]})
     assert folder is not None
-    if folder.name.casefold() == "mp3":
+    if folder.name.casefold() in {"mp3", ".spliff-originals"}:
         raise ValueError("Choose the main album folder instead of an MP3 archive.")
 
     def name_key(name):
@@ -79,8 +84,8 @@ def get_plan(db, candidate, original):
     destination_names = {name_key(pair["name"]) for pair in pairs}
     if len(destination_names) != len(pairs) or names & destination_names:
         raise ValueError("A FLAC with the same name already exists in the album folder.")
-    if "mp3" in names:
-        raise ValueError("An MP3 folder already exists here. Spliff will not combine archives.")
+    if name_key(ARCHIVES[mode]) in names:
+        raise ValueError("The MP3 destination already exists. Spliff will not combine archives.")
     if WORK_DIR in names:
         raise ValueError("A previous Keep both operation needs attention. Check the album folder before retrying.")
     copies = [pair["flac_sig"][0] for pair in pairs]
@@ -88,18 +93,18 @@ def get_plan(db, candidate, original):
     if sum(copies) + largest > shutil.disk_usage(folder).free:
         raise ValueError("There is not enough free space to copy the FLAC album.")
     return {"candidate": candidate, "root": str(root), "folder": str(folder),
-            "album": review["comparison"]["album"], "pairs": pairs}
+            "album": review["comparison"]["album"], "mode": mode, "pairs": pairs}
 
 
 def plan_token(plan):
     return hashlib.sha256(json.dumps(plan, sort_keys=True).encode()).hexdigest()
 
 
-def preview(db, candidate, original):
-    plan = get_plan(db, candidate, original)
+def preview(db, candidate, original, mode="keep"):
+    plan = get_plan(db, candidate, original, mode)
     destination = Path(plan["folder"])
     return {"token": plan_token(plan), "album": plan["album"], "destination": str(destination),
-            "archive": str(destination / "MP3"), "count": len(plan["pairs"])}
+            "archive": str(destination / ARCHIVES[mode]), "count": len(plan["pairs"])}
 
 
 def move_exclusive(source, destination):
@@ -118,6 +123,13 @@ def move_exclusive(source, destination):
     return destination
 
 
+def audio_digest(audio):
+    digest = hashlib.sha256()
+    for block in iter(lambda: audio.read(1024 * 1024), b""):
+        digest.update(block)
+    return digest.digest()
+
+
 def copy_then_remove(source, destination):
     expected = path_fingerprint(source)
     descriptor = os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
@@ -133,11 +145,9 @@ def copy_then_remove(source, destination):
             copy.flush()
             os.fsync(copy.fileno())
             copy.seek(0)
-            verified = hashlib.sha256()
-            for block in iter(lambda: copy.read(1024 * 1024), b""):
-                verified.update(block)
+            verified = audio_digest(copy)
             now = destination.lstat()
-            if (digest.digest() != verified.digest() or path_fingerprint(source) != expected
+            if (digest.digest() != verified or path_fingerprint(source) != expected
                     or signature(now) != signature(os.fstat(copy.fileno()))):
                 raise ValueError("The copied audio could not be verified.")
             os.utime(destination, ns=(os.fstat(original.fileno()).st_atime_ns, expected[1]))
@@ -155,11 +165,57 @@ def copy_verified(source, destination, expected):
     with os.fdopen(descriptor, "rb") as audio, destination.open("xb") as copy:
         if signature(os.fstat(audio.fileno())) != expected:
             raise ValueError("A staged file changed. Review the download again.")
-        shutil.copyfileobj(audio, copy, length=1024 * 1024)
+        digest = hashlib.sha256()
+        for block in iter(lambda: audio.read(1024 * 1024), b""):
+            digest.update(block)
+            copy.write(block)
         copy.flush()
         os.fsync(copy.fileno())
         if os.fstat(copy.fileno()).st_size != expected[0] or signature(os.fstat(audio.fileno())) != expected:
             raise ValueError("A staged file changed while copying.")
+        return digest.digest()
+
+
+def verify_published(path, expected, digest):
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(descriptor, "rb") as audio:
+        if (signature(os.fstat(audio.fileno())) != expected or audio_digest(audio) != digest
+                or path_fingerprint(path) != expected):
+            raise ValueError("The saved FLAC could not be verified.")
+
+
+def remove_staged_copies(plan, published):
+    removed = 0
+    try:
+        selection_parts(plan["candidate"])
+        job = staging_root() / plan["candidate"]
+        root = Path(plan["root"])
+        if job.is_relative_to(root) or root.is_relative_to(job) or job.resolve(strict=True) != job:
+            return removed
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+        with ExitStack() as directories:
+            job_fd = os.open(job, flags)
+            directories.callback(os.close, job_fd)
+            entries = []
+            for pair, (final, final_sig) in zip(plan["pairs"], published):
+                source = Path(pair["flac"])
+                if source.parent.parent != job or not source.parent.name.isdigit():
+                    return removed
+                directory = os.open(source.parent.name, flags, dir_fd=job_fd)
+                directories.callback(os.close, directory)
+                if signature(os.stat(source.name, dir_fd=directory, follow_symlinks=False)) != pair["flac_sig"]:
+                    return removed
+                entries.append((directory, source.name, pair["flac_sig"], final, final_sig))
+            for directory, name, source_sig, final, final_sig in entries:
+                if (path_fingerprint(final) != final_sig
+                        or signature(os.stat(name, dir_fd=directory, follow_symlinks=False)) != source_sig):
+                    break
+                os.unlink(name, dir_fd=directory)
+                removed += 1
+    except (OSError, ValueError):
+        # The album is already committed. Leave the remaining duplicates for recovery.
+        pass
+    return removed
 
 
 def clean_work(folder):
@@ -171,12 +227,12 @@ def clean_work(folder):
     shutil.rmtree(folder, onerror=ignore_gone)
 
 
-def apply(db, candidate, original, token):
-    plan = get_plan(db, candidate, original)
+def apply(db, candidate, original, token, mode="keep"):
+    plan = get_plan(db, candidate, original, mode)
     if token != plan_token(plan):
         raise ValueError("The comparison changed. Review the destination again before confirming.")
     folder, root = Path(plan["folder"]), Path(plan["root"])
-    archive, work = folder / "MP3", folder / WORK_DIR
+    archive, work = folder / ARCHIVES[mode], folder / WORK_DIR
     moved, published = [], []
     archive_created = False
     with closing(connect(db)) as connection:
@@ -190,8 +246,8 @@ def apply(db, candidate, original, token):
         work.mkdir(mode=0o700)
         try:
             (work / "plan.json").write_text(json.dumps(plan, indent=2), encoding="utf-8")
-            for pair in plan["pairs"]:
-                copy_verified(Path(pair["flac"]), work / pair["name"], pair["flac_sig"])
+            digests = [copy_verified(Path(pair["flac"]), work / pair["name"], pair["flac_sig"])
+                       for pair in plan["pairs"]]
             archive.mkdir()
             archive_created = True
             for pair in plan["pairs"]:
@@ -203,22 +259,23 @@ def apply(db, candidate, original, token):
                 saved_sig = path_fingerprint(saved)
                 moved.append((source, saved, saved_sig))
                 connection.execute(
-                    "UPDATE tracks SET path=?,size=?,mtime=?,device=?,inode=? WHERE id=?",
-                    (str(saved.relative_to(root)), *saved_sig, pair["id"]),
+                    "UPDATE tracks SET path=?,size=?,mtime=?,device=?,inode=?,present=? WHERE id=?",
+                    (str(saved.relative_to(root)), *saved_sig, int(mode == "keep"), pair["id"]),
                 )
-            for pair in plan["pairs"]:
+            for pair, digest in zip(plan["pairs"], digests):
                 temporary, final = work / pair["name"], folder / pair["name"]
                 move_exclusive(temporary, final)
                 fingerprint = path_fingerprint(final)
                 published.append((final, fingerprint))
+                verify_published(final, fingerprint, digest)
                 columns = ("root", "path", *AUDIO_FIELDS, "size", "mtime", "device", "inode")
                 connection.execute(
                     f"INSERT INTO tracks({','.join(columns)}) VALUES ({','.join('?' for _ in columns)})",
                     (str(root), str(final.relative_to(root)),
                      *(pair["audio"].get(key) for key in AUDIO_FIELDS), *fingerprint),
                 )
-            connection.execute("INSERT INTO kept_albums(candidate,destination) VALUES (?,?)",
-                               (candidate, str(folder)))
+            connection.execute("INSERT INTO kept_albums(candidate,destination,mode) VALUES (?,?,?)",
+                               (candidate, str(folder), mode))
             connection.commit()
         except BaseException:
             connection.rollback()
@@ -238,5 +295,12 @@ def apply(db, candidate, original, token):
                 raise ValueError(f"Keep both stopped. Check the recovery plan in {work} before retrying.") from exc
             clean_work(work)
             raise
+    staging_removed = remove_staged_copies(plan, published)
+    try:
         clean_work(work)
-    return {"destination": str(folder), "archive": str(archive), "count": len(plan["pairs"])}
+    except OSError:
+        work_cleanup_pending = True
+    else:
+        work_cleanup_pending = False
+    return {"destination": str(folder), "archive": str(archive), "count": len(plan["pairs"]),
+            "staging_removed": staging_removed, "work_cleanup_pending": work_cleanup_pending}

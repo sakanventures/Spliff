@@ -20,10 +20,12 @@ from spliff import keep_both
 from spliff.review import protect, reviews, stage
 from spliff.scanner import scan
 from spliff.nicotine_bridge.downloads import Downloads
-from spliff.staged_downloads import list_downloads, review_download, suggest_album
+from spliff.staged_downloads import list_downloads, queue, review_download, suggest_album
 
 @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "Requires FFmpeg")
 class VerticalSlice(unittest.TestCase):
+    album_selection = "album-" + "a" * 32 + "-0"
+
     def setUp(self):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
@@ -138,6 +140,13 @@ class VerticalSlice(unittest.TestCase):
             self.assertEqual(report["items"][0]["assessment"], "check release tags")
             self.assertEqual(self.original.read_bytes(), original_bytes)
             self.assertEqual(self.candidate.read_bytes(), staged_bytes)
+            with closing(connect(self.db)) as connection, connection:
+                connection.execute("UPDATE tracks SET album='Example Album' WHERE id=?", (indexed["id"],))
+            with patch("spliff.staged_downloads.request", side_effect=lambda operation, **args: bridge.status(args["selection"])):
+                queue(self.db, selection, original_id=indexed["id"])
+                remembered = review_download(self.db, selection)
+            self.assertEqual(remembered["comparison"],
+                             {"album": "Example Album", "original_track_id": indexed["id"], "suggested": False})
 
     def test_suggest_album_requires_one_indexed_edition(self):
         scan(self.db, self.root)
@@ -160,7 +169,13 @@ class VerticalSlice(unittest.TestCase):
     def keep_both_fixture(self):
         scan(self.db, self.root)
         indexed = tracks(self.db)["items"][0]
-        staged = self.candidate.resolve()
+        staging = self.base.resolve() / "staging"
+        staged = staging / self.album_selection / "001" / self.candidate.name
+        staged.parent.mkdir(parents=True)
+        shutil.copyfile(self.candidate, staged)
+        patcher = patch("spliff.keep_both.staging_root", return_value=staging)
+        patcher.start()
+        self.addCleanup(patcher.stop)
         audio = dict(indexed, codec="flac", format="flac", quality="lossless")
         report = {"kept_both": None, "kind": "album", "complete": 1, "originals_without_match": [],
                   "comparison": {"album": "Example Album"},
@@ -173,15 +188,23 @@ class VerticalSlice(unittest.TestCase):
         original_bytes = self.original.read_bytes()
         candidate_bytes = self.candidate.read_bytes()
         indexed, report = self.keep_both_fixture()
+        staged = Path(report["items"][0]["source"])
+        unrelated = staged.with_name("Another copy.flac")
+        unrelated.write_bytes(candidate_bytes)
+        selection = self.album_selection
         with patch("spliff.keep_both.review_download", return_value=report):
-            plan = keep_both.preview(self.db, "example", indexed["id"])
+            plan = keep_both.preview(self.db, selection, indexed["id"])
             self.assertTrue(self.original.exists())
             self.assertFalse((self.root / "MP3").exists())
             self.assertEqual(plan["archive"], str(self.root.resolve() / "MP3"))
             with self.assertRaisesRegex(ValueError, "comparison changed"):
-                keep_both.apply(self.db, "example", indexed["id"], "incorrect")
+                keep_both.apply(self.db, selection, indexed["id"], "incorrect")
             self.assertTrue(self.original.exists())
-            keep_both.apply(self.db, "example", indexed["id"], plan["token"])
+            self.assertTrue(staged.exists())
+            result = keep_both.apply(self.db, selection, indexed["id"], plan["token"])
+        self.assertEqual(result["staging_removed"], 1)
+        self.assertFalse(staged.exists())
+        self.assertEqual(unrelated.read_bytes(), candidate_bytes)
         self.assertFalse(self.original.exists())
         self.assertEqual((self.root / "MP3" / self.original.name).read_bytes(), original_bytes)
         self.assertEqual(self.original.with_suffix(".flac").read_bytes(), candidate_bytes)
@@ -192,9 +215,33 @@ class VerticalSlice(unittest.TestCase):
         self.assertEqual(catalog[1]["codec"], "flac")
 
     @unittest.skipUnless(sys.platform == "darwin", "Requires exclusive macOS rename")
+    def test_replace_retains_original_outside_active_index(self):
+        original_bytes = self.original.read_bytes()
+        indexed, report = self.keep_both_fixture()
+        selection = self.album_selection
+        with patch("spliff.keep_both.review_download", return_value=report):
+            keep = keep_both.preview(self.db, selection, indexed["id"])
+            replace = keep_both.preview(self.db, selection, indexed["id"], mode="replace")
+            self.assertTrue(replace["archive"].endswith("/.spliff-originals"))
+            with self.assertRaisesRegex(ValueError, "comparison changed"):
+                keep_both.apply(self.db, selection, indexed["id"], keep["token"], mode="replace")
+            self.assertTrue(self.original.exists())
+            result = keep_both.apply(self.db, selection, indexed["id"], replace["token"], mode="replace")
+        self.assertEqual(result["staging_removed"], 1)
+        self.assertFalse(Path(report["items"][0]["source"]).exists())
+        self.assertEqual((self.root / ".spliff-originals" / self.original.name).read_bytes(), original_bytes)
+        self.assertEqual(self.original.with_suffix(".flac").read_bytes(), self.candidate.read_bytes())
+        scan(self.db, self.root)
+        self.assertEqual([item["codec"] for item in tracks(self.db)["items"]], ["flac"])
+        with closing(connect(self.db)) as connection:
+            saved = connection.execute("SELECT mode FROM kept_albums WHERE candidate=?", (selection,)).fetchone()
+            self.assertEqual(saved["mode"], "replace")
+
+    @unittest.skipUnless(sys.platform == "darwin", "Requires exclusive macOS rename")
     def test_keep_both_rolls_back_when_publication_fails(self):
         indexed, report = self.keep_both_fixture()
         original_bytes = self.original.read_bytes()
+        selection = self.album_selection
         move = keep_both.move_exclusive
 
         def fail_on_flac(source, destination):
@@ -203,14 +250,60 @@ class VerticalSlice(unittest.TestCase):
             move(source, destination)
 
         with patch("spliff.keep_both.review_download", return_value=report):
-            plan = keep_both.preview(self.db, "example", indexed["id"])
+            plan = keep_both.preview(self.db, selection, indexed["id"])
             with patch("spliff.keep_both.move_exclusive", side_effect=fail_on_flac):
                 with self.assertRaisesRegex(OSError, "publication failure"):
-                    keep_both.apply(self.db, "example", indexed["id"], plan["token"])
+                    keep_both.apply(self.db, selection, indexed["id"], plan["token"])
         self.assertEqual(self.original.read_bytes(), original_bytes)
         self.assertFalse((self.root / "MP3").exists())
         self.assertFalse((self.root / keep_both.WORK_DIR).exists())
         self.assertEqual(tracks(self.db)["items"][0]["path"], indexed["path"])
+        self.assertEqual(Path(report["items"][0]["source"]).read_bytes(), self.candidate.read_bytes())
+
+    @unittest.skipUnless(sys.platform == "darwin", "Requires exclusive macOS rename")
+    def test_failed_flac_verification_keeps_the_download_and_mp3(self):
+        indexed, report = self.keep_both_fixture()
+        selection = self.album_selection
+        source = Path(report["items"][0]["source"])
+        original_bytes, staged_bytes = self.original.read_bytes(), source.read_bytes()
+        move = keep_both.move_exclusive
+
+        def corrupt_published_flac(temporary, final):
+            move(temporary, final)
+            if final.suffix == ".flac":
+                final.write_bytes(b"\0" * len(staged_bytes))
+
+        with patch("spliff.keep_both.review_download", return_value=report):
+            plan = keep_both.preview(self.db, selection, indexed["id"])
+            with patch("spliff.keep_both.move_exclusive", side_effect=corrupt_published_flac):
+                with self.assertRaisesRegex(ValueError, "could not be verified"):
+                    keep_both.apply(self.db, selection, indexed["id"], plan["token"])
+        self.assertEqual(self.original.read_bytes(), original_bytes)
+        self.assertEqual(source.read_bytes(), staged_bytes)
+        self.assertFalse(self.original.with_suffix(".flac").exists())
+
+    @unittest.skipUnless(sys.platform == "darwin", "Requires exclusive macOS rename")
+    def test_cleanup_failure_leaves_the_successful_import_in_place(self):
+        indexed, report = self.keep_both_fixture()
+        selection = self.album_selection
+        source = Path(report["items"][0]["source"])
+        original_bytes, staged_bytes = self.original.read_bytes(), source.read_bytes()
+        unlink = keep_both.os.unlink
+
+        def block_staged_unlink(path, **options):
+            if path == source.name:
+                raise PermissionError("Simulated staging cleanup failure")
+            return unlink(path, **options)
+
+        with patch("spliff.keep_both.review_download", return_value=report):
+            plan = keep_both.preview(self.db, selection, indexed["id"])
+            with patch("spliff.keep_both.os.unlink", side_effect=block_staged_unlink):
+                result = keep_both.apply(self.db, selection, indexed["id"], plan["token"])
+        self.assertEqual(result["staging_removed"], 0)
+        self.assertEqual(source.read_bytes(), staged_bytes)
+        self.assertEqual(self.original.with_suffix(".flac").read_bytes(), staged_bytes)
+        self.assertEqual((self.root / "MP3" / self.original.name).read_bytes(), original_bytes)
+        self.assertEqual([item["codec"] for item in tracks(self.db)["items"]], ["mp3", "flac"])
 
     @unittest.skipUnless(sys.platform == "darwin", "Exercises the macOS fallback")
     def test_keep_both_copy_fallback_refuses_conflicts(self):
@@ -229,6 +322,8 @@ class VerticalSlice(unittest.TestCase):
 
     def test_mcp_and_http(self):
         scan(self.db, self.root)
+        with closing(connect(self.db)) as connection, connection:
+            connection.execute("UPDATE tracks SET album='Example Album'")
         command = [sys.executable, "-m", "spliff", "--db", str(self.db)]
         messages = [
             {"id": 1, "method": "initialize", "params": {"protocolVersion": "2025-11-25",
@@ -257,6 +352,11 @@ class VerticalSlice(unittest.TestCase):
                     self.assertIn(b"Spliff", page.read())
                 with urlopen(base + "/api/tracks?scope=lossy", timeout=5) as result:
                     self.assertEqual(json.load(result), payload)
+                with urlopen(base + "/api/albums?q=example", timeout=5) as result:
+                    listing = json.load(result)
+                self.assertTrue(listing["has_library"])
+                self.assertEqual([(album["album"], album["mp3"]) for album in listing["items"]],
+                                 [("Example Album", 1)])
                 with self.assertRaises(HTTPError) as error:
                     urlopen(base + "/api/tracks?scope=bad", timeout=5)
                 self.assertEqual(error.exception.code, 400)

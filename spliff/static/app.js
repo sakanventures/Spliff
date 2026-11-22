@@ -121,11 +121,14 @@ async function loadReviews() {
 
 function view(page) {
   document.body.dataset.view = page;
-  for (const [id, key, panel] of [['browse', 'tracks', 'index'],
+  get('advanced').open = false;
+  for (const [id, key, panel] of [['albums', 'albums', 'albums-panel'], ['browse', 'tracks', 'index'],
     ['staged', 'reviews', 'review-panel'], ['downloads', 'downloads', 'downloads-panel']]) {
     get(id).setAttribute('aria-pressed', page === key);
     get(panel).hidden = page !== key;
   }
+  if (page === 'albums' && !get('album-library').hidden) loadAlbums();
+  if (page === 'tracks') { refreshSummary(); loadTracks(); }
   if (page === 'reviews') loadReviews();
   if (page === 'downloads') loadDownloads();
   else { downloadRequest++; downloadListRequest++; clearTimeout(downloadTimer); }
@@ -139,11 +142,153 @@ let selectedDownload = null;
 let downloadJobs = [];
 let keptComparison = null;
 
+let albumRequest = 0;
+let sourceRequest = 0;
+let currentAlbum = null;
+let choosingDownloadOriginal = false;
+let queueingAlbum = false;
+
+function albumCaption(album) {
+  return [album.artist, album.total + (album.total === 1 ? ' track' : ' tracks'),
+    album.mp3 === album.total ? 'MP3' : 'Mixed formats', album.protected && 'Protected tracks']
+    .filter(Boolean).join(' · ');
+}
+
+async function loadAlbums() {
+  const request = ++albumRequest;
+  const query = get('album-query').value.trim();
+  const list = get('album-list');
+  const status = get('album-status');
+  status.textContent = 'Finding albums…';
+  list.replaceChildren();
+  try {
+    const {items, more, has_library: hasLibrary} = await api('/api/albums?' + new URLSearchParams({q: query}));
+    if (request !== albumRequest) return;
+    get('scan').hidden = !hasLibrary;
+    get('album-filter').hidden = !hasLibrary;
+    get('library-empty').hidden = hasLibrary;
+    status.textContent = !hasLibrary ? '' : !items.length ?
+      (query ? 'No albums match your search.' : 'No indexed MP3 albums. Choose a folder to add one.') :
+      more ? 'Showing the first 25 albums. Search to narrow the list.' : '';
+    list.replaceChildren(...items.map(album => {
+      const row = element('li');
+      const title = element('div');
+      title.append(element('strong', album.album), element('small', albumCaption(album), 'muted'));
+      if (items.some(other => other.id !== album.id && other.album.toLowerCase() === album.album.toLowerCase())) {
+        title.append(element('small', [album.root, album.folder].filter(Boolean).join('/'), 'muted'));
+      }
+      const button = element('button', choosingDownloadOriginal ? 'Compare' : 'Find FLACs');
+      button.setAttribute('aria-label', button.textContent + ' for ' + album.album);
+      button.addEventListener('click', () => {
+        if (choosingDownloadOriginal) {
+          choosingDownloadOriginal = false;
+          downloadOriginal = {id: album.id, title: album.album};
+          view('downloads');
+        } else {
+          openAlbumSearch(album);
+        }
+      });
+      row.append(title, button);
+      return row;
+    }));
+  } catch (error) {
+    if (request === albumRequest) status.textContent = error.message;
+  }
+}
+
+function openAlbumSearch(album) {
+  currentAlbum = album;
+  get('album-library').hidden = true;
+  get('album-search').hidden = false;
+  get('selected-album-title').textContent = album.album;
+  get('selected-album-info').textContent = albumCaption(album);
+  get('soulseek-query').value = (album.album.trim().length < 2 ?
+    [album.artist, album.album].filter(Boolean).join(' ') : album.album).slice(0, 180);
+  get('soulseek-results').replaceChildren();
+  get('soulseek-status').textContent = '';
+  get('search-soulseek').disabled = false;
+  get('album-back').focus();
+  get('soulseek-form').requestSubmit();
+}
+
+function showAlbumLibrary(comparing = false) {
+  currentAlbum = null;
+  sourceRequest++;
+  choosingDownloadOriginal = comparing;
+  get('albums-heading').textContent = comparing ? 'Which album should Spliff compare?' : 'What album do you want to upgrade?';
+  get('album-library').hidden = false;
+  get('album-search').hidden = true;
+  view('albums');
+  if (!get('album-filter').hidden) get('album-query').focus();
+}
+
+async function queueAlbum(candidate, album) {
+  if (queueingAlbum) return;
+  queueingAlbum = true;
+  const status = get('soulseek-status');
+  const buttons = get('soulseek-results').querySelectorAll('button');
+  buttons.forEach(button => { button.disabled = true; });
+  status.textContent = 'Sending to Nicotine+…';
+  try {
+    const params = new URLSearchParams({candidate: candidate.candidate_id, original: album.id});
+    await action('/api/downloads?' + params);
+    notice('Sent to Nicotine+. The album will appear in Downloads when all files are ready.');
+    downloadOriginal = null;
+    if (currentAlbum === album && document.body.dataset.view === 'albums') view('downloads');
+    status.textContent = 'Sent to Nicotine+.';
+  } catch (error) {
+    if (currentAlbum === album) status.textContent = error.message;
+  } finally {
+    buttons.forEach(button => { button.disabled = false; });
+    queueingAlbum = false;
+  }
+}
+
+get('album-filter').addEventListener('submit', event => { event.preventDefault(); loadAlbums(); });
+get('album-back').addEventListener('click', () => showAlbumLibrary());
+get('soulseek-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  const request = ++sourceRequest;
+  const album = currentAlbum;
+  const status = get('soulseek-status');
+  const list = get('soulseek-results');
+  const searchButton = get('search-soulseek');
+  searchButton.disabled = true;
+  list.replaceChildren();
+  status.textContent = 'Searching Nicotine+…';
+  try {
+    const {candidates} = await action('/api/album-search?' + new URLSearchParams({q: get('soulseek-query').value}));
+    if (request !== sourceRequest) return;
+    const options = candidates.filter(candidate => candidate.candidate_id && candidate.flac_files === candidate.matching_files);
+    options.sort((first, second) => Math.abs(first.flac_files - album.total) - Math.abs(second.flac_files - album.total));
+    status.textContent = options.length ? 'Choose a FLAC download. Spliff checks it against your album after it finishes.' :
+      'No FLAC albums found. Try adding the artist or changing the search.';
+    list.replaceChildren(...options.slice(0, 3).map(candidate => {
+      const row = element('li');
+      const title = element('div');
+      title.append(element('strong', candidate.folder.split('\\').pop() || album.album),
+        element('small', candidate.flac_files + ' FLAC tracks found · ' + candidate.peer, 'muted'));
+      const button = element('button', 'Download', 'primary');
+      button.setAttribute('aria-label', 'Download FLACs from ' + candidate.peer);
+      button.addEventListener('click', () => queueAlbum(candidate, album));
+      row.append(title, button);
+      return row;
+    }));
+  } catch (error) {
+    if (request === sourceRequest) status.textContent = error.message;
+  } finally {
+    if (request === sourceRequest) searchButton.disabled = false;
+  }
+});
+
 function selectDownload(job) {
   if (selectedDownload?.id !== job.id) {
     get('download-report').replaceChildren();
     get('download-original').textContent = '';
     get('download-comparison').hidden = true;
+    get('download-note').hidden = true;
+    get('download-details').hidden = true;
+    get('download-details').open = false;
   }
   selectedDownload = job;
   get('download-heading').hidden = false;
@@ -184,6 +329,8 @@ async function loadDownloads(selected, quiet = false) {
       get('download-heading').hidden = true;
       get('download-comparison').hidden = true;
       get('download-report').replaceChildren();
+      get('download-note').hidden = true;
+      get('download-details').hidden = true;
       get('download-status').textContent = 'No completed downloads yet.';
     }
   } catch (error) {
@@ -206,7 +353,7 @@ function showDownload(result, job) {
   get('download-title').textContent = candidateAlbum || job.title;
   get('download-comparison').hidden = !result.complete && !downloadOriginal;
   const kept = result.kept_both;
-  get('download-original').textContent = kept ? 'Both versions saved' :
+  get('download-original').textContent = kept ? (kept.mode === 'replace' ? 'FLACs in use' : 'Both versions saved') :
     result.comparison?.album || downloadOriginal?.title || 'No album selected';
   get('choose-original').textContent = 'Choose comparison album';
   get('choose-original').hidden = Boolean(kept);
@@ -216,6 +363,16 @@ function showDownload(result, job) {
       !item.original.protected);
   get('keep-both').hidden = !eligible;
   keptComparison = eligible ? {candidate: job.id, original: result.comparison.original_track_id} : null;
+  const note = get('download-note');
+  let message = '';
+  if (kept) message = kept.mode === 'replace' ? 'FLACs are in use. The original MP3s are in the recovery folder.' :
+    'Both versions were saved. The original MP3s are in the MP3 folder.';
+  else if (result.comparison?.album_mismatch) message = 'Choose the matching album in your library.';
+  else if (review.some(item => item.original?.protected)) message = 'This album includes protected tracks.';
+  else if (result.comparison && !eligible && result.kind === 'album') message = 'Review the track details before using this download.';
+  note.textContent = message;
+  note.hidden = !message;
+  get('download-details').hidden = false;
   const rows = review.map(item => {
     const row = document.createElement('tr');
     const title = element('td', item.audio?.title || item.name);
@@ -242,7 +399,6 @@ function showDownload(result, job) {
   wrap.append(table);
   const report = get('download-report');
   report.replaceChildren(wrap);
-  if (kept) report.prepend(element('p', 'FLACs are in the album folder. Original MP3s are in its MP3 subfolder.', 'message'));
   if (candidateAlbum && result.comparison?.album_mismatch) {
     report.prepend(element('p', 'This download is ' + candidateAlbum + '. Choose that album in your library to compare it.', 'message'));
   }
@@ -268,6 +424,8 @@ async function refreshDownload() {
       get('download-heading').hidden = true;
       get('download-comparison').hidden = true;
       get('download-report').replaceChildren();
+      get('download-note').hidden = true;
+      get('download-details').hidden = true;
       get('download-status').textContent = '';
       return;
     }
@@ -302,22 +460,44 @@ let keepParameters = null;
 let keepPreviewRequest = 0;
 let applyingKeepBoth = false;
 
-get('keep-both').addEventListener('click', async () => {
+function showAlbumChoices() {
+  keepPreviewRequest++;
+  keepParameters = null;
+  get('keep-both-heading').textContent = 'Use the FLAC album';
+  get('album-actions-description').hidden = false;
+  get('album-action-choices').hidden = false;
+  get('album-action-preview').hidden = true;
+  get('album-action-confirmation').hidden = true;
+}
+
+get('keep-both').addEventListener('click', () => {
+  if (!keptComparison) return;
+  showAlbumChoices();
+  keepDialog.showModal();
+});
+
+async function previewAlbumAction(mode) {
   if (!keptComparison) return;
   const request = ++keepPreviewRequest;
-  const query = new URLSearchParams(keptComparison);
+  const query = new URLSearchParams({...keptComparison, mode});
   keepParameters = null;
   keepConfirm.disabled = true;
+  const replace = mode === 'replace';
+  get('keep-both-heading').textContent = replace ? 'Replace with FLACs' : 'Keep both versions';
+  keepConfirm.textContent = replace ? 'Confirm replace' : 'Confirm keep both';
+  get('album-actions-description').hidden = true;
+  get('album-action-choices').hidden = true;
+  get('album-action-preview').hidden = false;
+  get('album-action-confirmation').hidden = false;
   get('keep-both-summary').textContent = '';
   get('flac-destination').textContent = '';
   get('mp3-destination').textContent = '';
   keepStatus.textContent = 'Checking files and destinations…';
-  keepDialog.showModal();
   try {
     const plan = await api('/api/keep-both?' + query);
     if (!keepDialog.open || request !== keepPreviewRequest) return;
-    get('keep-both-summary').textContent =
-      'Copy ' + plan.count + ' FLACs into ' + plan.album + ' and move the matching MP3s into MP3.';
+    get('keep-both-summary').textContent = 'Copy ' + plan.count + ' FLACs into ' + plan.album +
+      (replace ? ' and save the original MP3s in the recovery folder.' : ' and move the original MP3s into MP3.');
     get('flac-destination').textContent = plan.destination;
     get('mp3-destination').textContent = plan.archive;
     keepStatus.textContent = '';
@@ -327,8 +507,11 @@ get('keep-both').addEventListener('click', async () => {
   } catch (error) {
     if (request === keepPreviewRequest) keepStatus.textContent = error.message;
   }
-});
+}
 
+get('choose-keep-both').addEventListener('click', () => previewAlbumAction('keep'));
+get('choose-replace').addEventListener('click', () => previewAlbumAction('replace'));
+get('back-to-album-actions').addEventListener('click', showAlbumChoices);
 get('cancel-keep-both').addEventListener('click', () => keepDialog.close());
 keepDialog.addEventListener('cancel', event => { if (applyingKeepBoth) event.preventDefault(); });
 keepConfirm.addEventListener('click', async () => {
@@ -336,29 +519,42 @@ keepConfirm.addEventListener('click', async () => {
   applyingKeepBoth = true;
   keepConfirm.disabled = true;
   get('cancel-keep-both').disabled = true;
-  keepStatus.textContent = 'Saving both versions…';
+  get('back-to-album-actions').disabled = true;
+  const replace = keepParameters.get('mode') === 'replace';
+  keepStatus.textContent = replace ? 'Swapping in FLACs…' : 'Saving both versions…';
   try {
-    await action('/api/keep-both?' + keepParameters);
+    const result = await action('/api/keep-both?' + keepParameters);
     keepDialog.close();
-    notice('Both versions saved. Original MP3s are in the album’s MP3 folder.');
+    const installed = replace ? 'FLACs are now in use. Original MP3s are in the recovery folder.' :
+      'Both versions saved. Original MP3s are in the album’s MP3 folder.';
+    const cleanup = result.staging_removed === result.count ? 'Download copy removed.' :
+      'Some download files remain in staging.';
+    notice([installed, cleanup, result.work_cleanup_pending && 'A temporary work folder remains.']
+      .filter(Boolean).join(' '));
     refreshSummary();
     loadTracks();
-    refreshDownload();
+    downloadOriginal = null;
+    loadDownloads();
   } catch (error) {
     keepStatus.textContent = error.message;
   } finally {
     applyingKeepBoth = false;
     get('cancel-keep-both').disabled = false;
+    get('back-to-album-actions').disabled = false;
   }
 });
 
 get('reload-download').addEventListener('click', refreshDownload);
 get('choose-original').addEventListener('click', () => {
   const job = downloadJobs.find(item => item.id === selectedDownload?.id);
-  get('search').value = job?.kind === 'album' ? get('download-title').textContent : '';
+  if (job?.kind === 'album') {
+    get('album-query').value = get('download-title').textContent;
+    showAlbumLibrary(true);
+    return;
+  }
+  get('search').value = '';
   get('scope').value = 'all';
   view('tracks');
-  loadTracks();
   get('search').focus();
 });
 
@@ -368,6 +564,7 @@ get('more').addEventListener('click', () => loadTracks(false));
 get('browse').addEventListener('click', () => view('tracks'));
 get('staged').addEventListener('click', () => view('reviews'));
 get('downloads').addEventListener('click', () => view('downloads'));
+get('albums').addEventListener('click', () => showAlbumLibrary());
 function refreshSummary() {
   api('/api/summary').then(data => {
     for (const key of ['tracks', 'lossless', 'lossy', 'protected']) get(key).textContent = data[key].toLocaleString();
@@ -456,29 +653,28 @@ document.addEventListener('drop', event => {
   if (event.dataTransfer.types.includes('Files')) event.preventDefault();
 });
 
-get('scan').addEventListener('click', async () => {
+async function scanMusic() {
   get('scan').disabled = true;
-  notice('Choose a folder in the macOS picker. Spliff will scan it after you confirm.');
+  get('add-library').disabled = true;
+  notice('Choose a music folder in Finder.');
   try {
     const result = await action('/api/scan');
     if (result.cancelled) {
       notice('Folder selection canceled.');
     } else {
-      notice('Scan complete. ' + result.probed + ' inspected, ' + result.cached + ' already indexed, ' +
-        result.errors + ' inspection errors.');
-      refreshSummary();
-      loadTracks();
+      notice(result.errors ? 'Scan complete. Some files could not be read. See Advanced → Track index.' :
+        'Scan complete. Your library is saved.');
+      if (document.body.dataset.view === 'tracks') { refreshSummary(); loadTracks(); }
+      if (document.body.dataset.view === 'albums') showAlbumLibrary();
     }
   } catch (error) {
     notice(error.message);
   } finally {
     get('scan').disabled = false;
+    get('add-library').disabled = false;
   }
-});
+}
 
-refreshSummary();
-loadTracks();
-api('/api/downloads').then(({items}) => {
-  if (items.length && !get('search').value && !get('index').hidden
-      && document.activeElement === document.body) view('downloads');
-}).catch(() => {});
+get('scan').addEventListener('click', scanMusic);
+get('add-library').addEventListener('click', scanMusic);
+view('albums');
