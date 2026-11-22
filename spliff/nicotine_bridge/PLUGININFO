@@ -1,0 +1,4 @@
+Name = "Spliff Search"
+Description = "Returns Soulseek search candidates to the local Spliff catalog."
+Authors = ["Spliff contributors"]
+Version = "0.1.0"

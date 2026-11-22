@@ -88,7 +88,7 @@ class VerticalSlice(unittest.TestCase):
         initialized, listing, called = map(json.loads, output.stdout.splitlines())
         self.assertEqual(initialized["result"]["protocolVersion"], "2025-11-25")
         self.assertEqual(initialized["result"]["serverInfo"]["title"], "Spliff")
-        self.assertEqual(len(listing["result"]["tools"]), 3)
+        self.assertEqual(len(listing["result"]["tools"]), 4)
         payload = json.loads(called["result"]["content"][0]["text"])
         self.assertEqual(payload["items"][0]["title"], "Rare 100%")
         with subprocess.Popen(command + ["serve", "--port", "0"], stdout=subprocess.PIPE, text=True) as server:

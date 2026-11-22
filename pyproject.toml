@@ -15,7 +15,8 @@ license-files = ["LICENSE"]
 spliff = "spliff.__main__:main"
 
 [tool.setuptools]
-packages = ["spliff"]
+packages = ["spliff", "spliff.nicotine_bridge"]
 
 [tool.setuptools.package-data]
 spliff = ["static/*.html", "static/*.css", "static/*.js"]
+"spliff.nicotine_bridge" = ["PLUGININFO"]

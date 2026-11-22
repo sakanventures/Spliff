@@ -42,3 +42,20 @@ The server implements legacy MCP stdio negotiation through version `2025-11-25`.
 See [Contributing](CONTRIBUTING.md) for the development setup and tests, and the [integration plan](INTEGRATIONS.md) for upstream interfaces and compatibility checks. Spliff is licensed under the [MIT License](LICENSE).
 
 The initial release targets macOS. The vertical slice has been exercised with generated audio. A multi-terabyte benchmark, live Soulseek transfer validation, and broader MCP client testing are still pending.
+
+## Search Soulseek from chat
+
+Spliff Search uses an installed, connected copy of Nicotine+ 3.3.11. Install the bridge once, then enable **Spliff Search** in Nicotine+ preferences under **Plugins**. Keep Nicotine+ running and signed in while searching.
+
+```sh
+spliff install-nicotine-plugin
+spliff nicotine-status
+```
+
+If Nicotine+ uses a custom plugin folder, pass its path with `--plugins-dir`. The installer leaves an existing bridge installation intact.
+
+The `search_nicotine` MCP tool accepts a search query, a track or album mode, and an optional result limit. It returns peer-advertised lossless candidates from an eight-second search. Album results describe matching files seen in that window. They do not confirm a complete album or its edition.
+
+For a local MCP client, use the installed Spliff executable with arguments `mcp --search-only`. For standard ChatGPT, use the [OpenAI Secure MCP Tunnel stdio setup](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels) with the absolute Spliff executable and the same arguments as the MCP command. Use a Platform tunnel and runtime key associated with the ChatGPT workspace, then add the tunnel as a custom MCP connection in ChatGPT. The search-only command excludes the catalog tools. The dashboard stays local. Search terms go to Soulseek and candidate metadata goes to the connected chat.
+
+Try asking the connected chat to find up to three possible lossless editions of an album. This milestone supports search. Download queueing and album replacement are future additions.
