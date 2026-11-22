@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Connect Discogs · Spliff</title>
+  <link rel="stylesheet" href="{{entry}}/app.css">
+  <link rel="stylesheet" href="{{entry}}/setup.css">
+</head>
+<body class="discogs-setup">
+  <main class="panel">
+    <div class="brand"><span class="record" aria-hidden="true"></span>Spliff</div>
+    <h1>Connect Discogs</h1>
+    <p class="muted">Enter the Consumer Key and Consumer Secret from your Spliff application in Discogs.</p>
+    {{error}}
+    <form method="post" action="{{entry}}" autocomplete="off">
+      <label>Consumer Key
+        <input name="key" type="password" required maxlength="256">
+      </label>
+      <label>Consumer Secret
+        <input name="secret" type="password" required maxlength="256">
+      </label>
+      <button class="primary" type="submit">Continue to Discogs</button>
+    </form>
+    <p class="local"><span aria-hidden="true"></span>Stored on this Mac. You’ll approve access on Discogs.</p>
+  </main>
+</body>
+</html>

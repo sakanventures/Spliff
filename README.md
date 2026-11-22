@@ -60,6 +60,14 @@ For a local MCP client, use the installed Spliff executable with arguments `mcp 
 
 Try asking the connected chat to find up to three possible lossless editions of an album. The default ChatGPT connection exposes search. The dashboard can queue a selected result as described below.
 
+### Discogs release lookup
+
+The operator adds `--allow-discogs` to the Spliff MCP command, sets the app's `SPLIFF_DISCOGS_CONSUMER_KEY` and `SPLIFF_DISCOGS_CONSUMER_SECRET` in the local process environment, and refreshes the connection's tools in ChatGPT. Ask ChatGPT to connect Discogs. Open the approval link on the same Mac that runs Spliff, approve in Discogs, and return to chat. Spliff saves the resulting credential in an owner-only file under its Application Support directory. The callback listens only on that Mac and expires after five minutes.
+
+For setup without environment variables, run `spliff discogs-setup` and open the one-time link on that Mac. Enter the application key and secret on the local page, then approve access on Discogs. Spliff stores the application credentials locally using the same owner-only storage.
+
+For an existing personal-token setup, Spliff also accepts the `SPLIFF_DISCOGS_TOKEN` environment variable or the macOS Keychain item named `Spliff Discogs`. Chat requests take an artist and release title or a Discogs release ID. Results link to Discogs.
+
 ## Stage and review a search candidate
 
 On the local dashboard, choose a music folder or an album folder to scan. Spliff remembers the scan. Find an MP3 album under **Albums**, click **Find FLACs**, and choose a source to download. Spliff remembers which indexed album you chose for the comparison.
@@ -74,6 +82,12 @@ The ChatGPT connection can stay search-only while the dashboard handles queueing
 
 ### Keep both versions
 
+When ChatGPT reviews a completed album with the download tools enabled, Spliff returns the **Keep both** or **Replace** question. The user chooses an option and confirms the destinations before anything in the library is changed. If the editions differ, Spliff reports the comparison issue and leaves the download staged.
+
+The chat review also provides filing rules for the destination preview. Reuse an existing artist folder when the artist's identity is verified, including a former or current name. Otherwise, propose a new artist folder in the chosen library. File releases as `Artist/Category/[YYYY] Release Title`, using the year of the downloaded edition. Categories include Albums, Singles, EPs, Mixtapes, and Posthumous Albums. Deluxe reissues stay in Albums.
+
+For multi-disc releases, the preview groups audio under `Disc 1`, `Disc 2`, and so on. Filenames restart at `01 Title.flac` on each disc and retain the source extension. Title tags contain only the title. Single-disc releases use the same filenames directly inside the release folder.
+
 For an album with a complete one-to-one FLAC match against unprotected MP3 originals, click **Use FLACs** and choose **Keep both** or **Replace**. Either choice leads to a destination preview and a separate confirmation.
 
-Spliff copies the staged FLACs into the album directory. **Keep both** moves the MP3s into `MP3`, preserving their indexed IDs. **Replace** keeps the originals in a hidden `.spliff-originals` recovery folder and shows only the FLACs in the active catalog. Once the saved FLACs pass byte-for-byte verification and the catalog update succeeds, Spliff removes the matching audio files from its Nicotine+ staging folder. Existing destinations and protected originals block the operation. If the Mac loses power during the operation, a hidden `.spliff-keep-both` directory in the album folder can contain the recovery plan. Review it before retrying.
+Spliff copies the staged FLACs into the album directory. **Keep both** moves the MP3s into `MP3`, preserving their indexed IDs. **Replace** sends the originals to the Mac Trash by default after Spliff verifies and indexes the FLACs. Choose a hidden recovery folder under **Advanced → Settings**, or ask ChatGPT to change the replacement preference when the MCP download tools are enabled. If the Trash move fails, Spliff reports where the original files are still saved. Once the saved FLACs pass byte-for-byte verification and the catalog update succeeds, Spliff removes the matching audio files from its Nicotine+ staging folder. Existing destinations and protected originals block the operation. If the Mac loses power during the operation, a hidden `.spliff-keep-both` directory in the album folder can contain the recovery plan. Review it before retrying.

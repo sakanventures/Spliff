@@ -30,6 +30,7 @@ CREATE TABLE IF NOT EXISTS kept_albums(
  created TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS download_comparisons(
  candidate TEXT PRIMARY KEY, original_id INTEGER NOT NULL REFERENCES tracks(id));
+CREATE TABLE IF NOT EXISTS preferences(key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS reviews(
  id INTEGER PRIMARY KEY, original_id INTEGER NOT NULL REFERENCES tracks(id),
  candidate TEXT NOT NULL, snapshot TEXT NOT NULL, original_snapshot TEXT NOT NULL,
@@ -42,6 +43,23 @@ def connect(db):
     connection.execute("PRAGMA foreign_keys=ON")
     return connection
 
+
+def replacement_destination(connection):
+    row = connection.execute("SELECT value FROM preferences WHERE key='replace_originals'").fetchone()
+    return row["value"] if row else "trash"
+
+
+def replacement_preference(db, destination=None):
+    if destination is not None and destination not in ("trash", "hidden"):
+        raise ValueError("Choose Mac Trash or Hidden recovery folder.")
+    with closing(connect(db)) as connection, connection:
+        if destination is not None:
+            connection.execute("""
+                INSERT INTO preferences(key,value) VALUES ('replace_originals',?)
+                ON CONFLICT(key) DO UPDATE SET value=excluded.value
+            """, (destination,))
+        return {"destination": replacement_destination(connection)}
+
 def initialize(db):
     db.parent.mkdir(parents=True, exist_ok=True)
     with closing(connect(db)) as connection:
@@ -53,8 +71,17 @@ def initialize(db):
             if "mode" not in columns:
                 connection.execute("ALTER TABLE kept_albums ADD COLUMN mode TEXT NOT NULL DEFAULT 'keep'")
 
+def sqlite_integer(value):
+    # SQLite stores signed integers, while filesystem identifiers can be unsigned.
+    return (value + 2**63) % 2**64 - 2**63
+
+
+def file_identity(info):
+    return sqlite_integer(info.st_dev), sqlite_integer(info.st_ino)
+
+
 def signature(info):
-    return info.st_size, info.st_mtime_ns, info.st_dev, info.st_ino
+    return sqlite_integer(info.st_size), sqlite_integer(info.st_mtime_ns), *file_identity(info)
 
 def probe(binary, descriptor, timeout=30):
     result = subprocess.run(

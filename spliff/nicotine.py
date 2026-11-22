@@ -82,17 +82,20 @@ def album_folders(files, search_id=None):
             **({"candidate_id": f"album-{search_id}-{index}"} if search_id else {}),
             "formats": sorted({file["format"] for file in entries}),
             "flac_files": sum(file["format"] == "flac" for file in selected),
+            "total_bytes": sum(file.get("bytes") or 0 for file in selected),
+            "quality": [dict(sample_rate=rate, bit_depth=depth) for rate, depth in sorted(
+                {(file.get("sample_rate") or 0, file.get("bit_depth") or 0) for file in selected})],
             "free_slot": entries[0]["free_slot"], "queue": entries[0]["queue"],
             "filenames": sorted(names, key=lambda name: (name.casefold(), name))[:40],
         })
-    return sorted(candidates, key=lambda item: (-item["matching_files"], *availability(item)))
+    return sorted(candidates, key=lambda item: (-item["total_bytes"], *availability(item)))
 
 
 def search(_db, query=None, kind="track", limit=3):
     query = search_term(query)
     if kind not in ("track", "album"):
         raise ValueError("Choose a track or album search.")
-    if type(limit) is not int or not 1 <= limit <= 10:
+    if limit is not None and (type(limit) is not int or not 1 <= limit <= 10):
         raise ValueError("Choose between 1 and 10 candidates.")
     response = request("search", query=query)
     files = response["files"]
@@ -107,7 +110,7 @@ def search(_db, query=None, kind="track", limit=3):
     return {
         "query": query, "kind": kind, "candidates": candidates[:limit],
         "observed_matches": len(candidates), "search_window_seconds": WINDOW_SECONDS,
-        "truncated": response["truncated"] or len(candidates) > limit,
+        "truncated": response["truncated"] or (limit is not None and len(candidates) > limit),
         "verification": ("Peer-reported filenames, formats, and availability. "
                          "Album counts describe matching files returned during the search window. "
                          "Edition, completeness, and fidelity require verification."),

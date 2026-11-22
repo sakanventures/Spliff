@@ -6,19 +6,21 @@ import json
 import os
 import shutil
 import stat
+import subprocess
 import sys
 import unicodedata
 from contextlib import ExitStack, closing
 from pathlib import Path
 
-from .catalog import connect, signature
+from .catalog import connect, file_identity, replacement_destination, signature
 from .nicotine_bridge.downloads import selection_parts
 from .nicotine_bridge.wire import staging_root
 from .scanner import AUDIO_FIELDS
 from .staged_downloads import review_download
 
 WORK_DIR = ".spliff-keep-both"
-ARCHIVES = {"keep": "MP3", "replace": ".spliff-originals"}
+MP3_FOLDER = "MP3"
+HIDDEN_ARCHIVE = ".spliff-originals"
 
 
 def path_fingerprint(path):
@@ -31,7 +33,7 @@ def path_fingerprint(path):
 
 
 def get_plan(db, candidate, original, mode="keep"):
-    if mode not in ARCHIVES:
+    if mode not in ("keep", "replace"):
         raise ValueError("Choose Keep both or Replace.")
     if sys.platform != "darwin":
         raise ValueError("Keep both currently requires macOS.")
@@ -47,6 +49,7 @@ def get_plan(db, candidate, original, mode="keep"):
     pairs = []
     root = folder = None
     with closing(connect(db)) as connection:
+        original_mode = replacement_destination(connection) if mode == "replace" else "keep"
         for item in items:
             track = connection.execute("""
                 SELECT t.*, r.device AS root_device, r.inode AS root_inode
@@ -60,7 +63,7 @@ def get_plan(db, candidate, original, mode="keep"):
             if folder is None:
                 root, folder = track_root, mp3.parent
                 info = root.stat()
-                if (info.st_dev, info.st_ino) != (track["root_device"], track["root_inode"]):
+                if file_identity(info) != (track["root_device"], track["root_inode"]):
                     raise ValueError("The library folder changed. Scan it again before continuing.")
             if track_root != root or mp3.parent != folder or not mp3.is_relative_to(root):
                 raise ValueError("Select originals from a single album folder.")
@@ -84,7 +87,8 @@ def get_plan(db, candidate, original, mode="keep"):
     destination_names = {name_key(pair["name"]) for pair in pairs}
     if len(destination_names) != len(pairs) or names & destination_names:
         raise ValueError("A FLAC with the same name already exists in the album folder.")
-    if name_key(ARCHIVES[mode]) in names:
+    archive_name = {"keep": MP3_FOLDER, "hidden": HIDDEN_ARCHIVE}.get(original_mode)
+    if archive_name and name_key(archive_name) in names:
         raise ValueError("The MP3 destination already exists. Spliff will not combine archives.")
     if WORK_DIR in names:
         raise ValueError("A previous Keep both operation needs attention. Check the album folder before retrying.")
@@ -93,7 +97,9 @@ def get_plan(db, candidate, original, mode="keep"):
     if sum(copies) + largest > shutil.disk_usage(folder).free:
         raise ValueError("There is not enough free space to copy the FLAC album.")
     return {"candidate": candidate, "root": str(root), "folder": str(folder),
-            "album": review["comparison"]["album"], "mode": mode, "pairs": pairs}
+            "album": review["comparison"]["album"], "mode": mode, "pairs": pairs,
+            "original_mode": original_mode,
+            "original_destination": str(folder / archive_name) if archive_name else "Mac Trash"}
 
 
 def plan_token(plan):
@@ -104,7 +110,7 @@ def preview(db, candidate, original, mode="keep"):
     plan = get_plan(db, candidate, original, mode)
     destination = Path(plan["folder"])
     return {"token": plan_token(plan), "album": plan["album"], "destination": str(destination),
-            "archive": str(destination / ARCHIVES[mode]), "count": len(plan["pairs"])}
+            "archive": plan["original_destination"], "count": len(plan["pairs"])}
 
 
 def move_exclusive(source, destination):
@@ -150,7 +156,8 @@ def copy_then_remove(source, destination):
             if (digest.digest() != verified or path_fingerprint(source) != expected
                     or signature(now) != signature(os.fstat(copy.fileno()))):
                 raise ValueError("The copied audio could not be verified.")
-            os.utime(destination, ns=(os.fstat(original.fileno()).st_atime_ns, expected[1]))
+            source_info = os.fstat(original.fileno())
+            os.utime(destination, ns=(source_info.st_atime_ns, source_info.st_mtime_ns))
             os.fsync(copy.fileno())
             source.unlink()
         except BaseException:
@@ -232,11 +239,15 @@ def apply(db, candidate, original, token, mode="keep"):
     if token != plan_token(plan):
         raise ValueError("The comparison changed. Review the destination again before confirming.")
     folder, root = Path(plan["folder"]), Path(plan["root"])
-    archive, work = folder / ARCHIVES[mode], folder / WORK_DIR
+    work = folder / WORK_DIR
+    original_mode = plan["original_mode"]
+    archive = work / MP3_FOLDER if original_mode == "trash" else Path(plan["original_destination"])
     moved, published = [], []
     archive_created = False
     with closing(connect(db)) as connection:
         connection.execute("BEGIN IMMEDIATE")
+        if mode == "replace" and replacement_destination(connection) != original_mode:
+            raise ValueError("The replacement setting changed. Review the destinations again.")
         for pair in plan["pairs"]:
             row = connection.execute(
                 "SELECT root,path,protected,codec,present,error FROM tracks WHERE id=?", (pair["id"],)
@@ -295,12 +306,23 @@ def apply(db, candidate, original, token, mode="keep"):
                 raise ValueError(f"Keep both stopped. Check the recovery plan in {work} before retrying.") from exc
             clean_work(work)
             raise
+    trash_pending = None
+    if original_mode == "trash":
+        try:
+            subprocess.run(["/usr/bin/trash", str(archive)], check=True, capture_output=True, timeout=30)
+        except (OSError, subprocess.SubprocessError):
+            trash_pending = str(archive) if archive.exists() else None
+        else:
+            if archive.exists():
+                trash_pending = str(archive)
     staging_removed = remove_staged_copies(plan, published)
     try:
-        clean_work(work)
+        if not trash_pending:
+            clean_work(work)
     except OSError:
         work_cleanup_pending = True
     else:
-        work_cleanup_pending = False
-    return {"destination": str(folder), "archive": str(archive), "count": len(plan["pairs"]),
+        work_cleanup_pending = bool(trash_pending)
+    return {"destination": str(folder), "archive": plan["original_destination"],
+            "trash_pending": trash_pending, "count": len(plan["pairs"]),
             "staging_removed": staging_removed, "work_cleanup_pending": work_cleanup_pending}

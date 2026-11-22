@@ -1,0 +1,14 @@
+.discogs-setup {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 24px 0;
+}
+.discogs-setup main { width: min(90vw, 460px); padding: clamp(24px, 6vw, 40px); }
+.discogs-setup .brand { margin-bottom: 28px; }
+.discogs-setup h1 { font-size: clamp(2rem, 7vw, 2.75rem); }
+.discogs-setup p { line-height: 1.5; }
+.discogs-setup form { display: grid; gap: 16px; padding: 0; margin: 24px 0 20px; }
+.discogs-setup form button { margin-top: 4px; }
+.discogs-setup input, .discogs-setup button { min-height: 44px; }
+.discogs-setup [role="alert"] { border-inline-start: 2px solid var(--accent); padding-inline-start: 12px; }

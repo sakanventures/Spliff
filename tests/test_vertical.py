@@ -15,7 +15,7 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 from urllib.parse import quote
 
-from spliff.catalog import connect, signature, stats, tracks
+from spliff.catalog import connect, replacement_preference, signature, stats, tracks
 from spliff import keep_both
 from spliff.review import protect, reviews, stage
 from spliff.scanner import scan
@@ -25,6 +25,12 @@ from spliff.staged_downloads import list_downloads, queue, review_download, sugg
 @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "Requires FFmpeg")
 class VerticalSlice(unittest.TestCase):
     album_selection = "album-" + "a" * 32 + "-0"
+
+    def test_unsigned_filesystem_identifier_fits_sqlite(self):
+        info = SimpleNamespace(st_size=42, st_mtime_ns=100, st_dev=3, st_ino=2**63 + 7)
+        with closing(connect(":memory:")) as connection:
+            self.assertEqual(tuple(connection.execute("SELECT ?,?,?,?", signature(info)).fetchone()),
+                             (42, 100, 3, -2**63 + 7))
 
     def setUp(self):
         directory = tempfile.TemporaryDirectory()
@@ -72,6 +78,25 @@ class VerticalSlice(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "changed identity"):
             scan(self.db, self.root)
         self.assertEqual(stats(self.db)["tracks"], 1)
+
+    def test_overlapping_scans_preserve_track_ids_and_limit_missing_checks(self):
+        album = self.root / "Album"
+        album.mkdir()
+        original = self.original.rename(album / self.original.name)
+        scan(self.db, album)
+        track_id = tracks(self.db)["items"][0]["id"]
+        protect(self.db, track_id, True)
+        stage(self.db, track_id, self.candidate)
+        sibling = self.root / "Other.mp3"
+        shutil.copyfile(original, sibling)
+        self.assertEqual(scan(self.db, self.root)["cached"], 1)
+        self.assertEqual(stats(self.db)["roots"], 1)
+        self.assertEqual(tracks(self.db)["items"][0]["id"], track_id)
+        self.assertEqual(reviews(self.db)[0]["original_id"], track_id)
+        original.unlink()
+        self.assertEqual(scan(self.db, album)["missing"], 1)
+        self.assertEqual([item["path"] for item in tracks(self.db)["items"]], [sibling.name])
+        self.assertEqual(tracks(self.db, scope="missing")["items"][0]["protected"], 1)
 
     def test_catalog_cannot_be_inside_library(self):
         never = self.root / "index/catalog.db"
@@ -215,27 +240,53 @@ class VerticalSlice(unittest.TestCase):
         self.assertEqual(catalog[1]["codec"], "flac")
 
     @unittest.skipUnless(sys.platform == "darwin", "Requires exclusive macOS rename")
-    def test_replace_retains_original_outside_active_index(self):
+    def test_replace_moves_original_to_trash_after_verification(self):
         original_bytes = self.original.read_bytes()
         indexed, report = self.keep_both_fixture()
         selection = self.album_selection
         with patch("spliff.keep_both.review_download", return_value=report):
             keep = keep_both.preview(self.db, selection, indexed["id"])
             replace = keep_both.preview(self.db, selection, indexed["id"], mode="replace")
-            self.assertTrue(replace["archive"].endswith("/.spliff-originals"))
+            self.assertEqual(replace["archive"], "Mac Trash")
             with self.assertRaisesRegex(ValueError, "comparison changed"):
                 keep_both.apply(self.db, selection, indexed["id"], keep["token"], mode="replace")
             self.assertTrue(self.original.exists())
-            result = keep_both.apply(self.db, selection, indexed["id"], replace["token"], mode="replace")
+            def trash(command, **_options):
+                self.assertEqual(command[0], "/usr/bin/trash")
+                self.assertEqual(self.original.with_suffix(".flac").read_bytes(), self.candidate.read_bytes())
+                Path(command[1]).rename(self.base / "Test Trash")
+
+            with patch("spliff.keep_both.subprocess.run", side_effect=trash):
+                result = keep_both.apply(self.db, selection, indexed["id"], replace["token"], mode="replace")
         self.assertEqual(result["staging_removed"], 1)
         self.assertFalse(Path(report["items"][0]["source"]).exists())
-        self.assertEqual((self.root / ".spliff-originals" / self.original.name).read_bytes(), original_bytes)
+        self.assertIsNone(result["trash_pending"])
+        self.assertEqual((self.base / "Test Trash" / self.original.name).read_bytes(), original_bytes)
+        self.assertFalse((self.root / ".spliff-originals").exists())
         self.assertEqual(self.original.with_suffix(".flac").read_bytes(), self.candidate.read_bytes())
         scan(self.db, self.root)
         self.assertEqual([item["codec"] for item in tracks(self.db)["items"]], ["flac"])
         with closing(connect(self.db)) as connection:
             saved = connection.execute("SELECT mode FROM kept_albums WHERE candidate=?", (selection,)).fetchone()
             self.assertEqual(saved["mode"], "replace")
+
+    @unittest.skipUnless(sys.platform == "darwin", "Requires exclusive macOS rename")
+    def test_replace_honors_hidden_recovery_preference(self):
+        original_bytes = self.original.read_bytes()
+        indexed, report = self.keep_both_fixture()
+        selection = self.album_selection
+        with patch("spliff.keep_both.review_download", return_value=report):
+            previous = keep_both.preview(self.db, selection, indexed["id"], mode="replace")
+            self.assertEqual(previous["archive"], "Mac Trash")
+            replacement_preference(self.db, "hidden")
+            self.assertEqual(replacement_preference(self.db)["destination"], "hidden")
+            with self.assertRaisesRegex(ValueError, "comparison changed"):
+                keep_both.apply(self.db, selection, indexed["id"], previous["token"], mode="replace")
+            preview = keep_both.preview(self.db, selection, indexed["id"], mode="replace")
+            result = keep_both.apply(self.db, selection, indexed["id"], preview["token"], mode="replace")
+        archive = self.root / ".spliff-originals"
+        self.assertEqual(Path(result["archive"]), archive.resolve())
+        self.assertEqual((archive / self.original.name).read_bytes(), original_bytes)
 
     @unittest.skipUnless(sys.platform == "darwin", "Requires exclusive macOS rename")
     def test_keep_both_rolls_back_when_publication_fails(self):

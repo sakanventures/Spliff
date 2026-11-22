@@ -7,6 +7,7 @@ from pathlib import Path
 
 from . import mcp, web
 from .catalog import initialize
+from .discogs_auth import setup_discogs
 from .review import protect, stage
 from .nicotine import install_plugin, request
 from .scanner import scan
@@ -25,11 +26,14 @@ def main():
                             help="Expose only Nicotine+ search to a connected chat")
     mcp_parser.add_argument("--allow-downloads", action="store_true",
                             help="Also expose explicitly selected downloads and review")
+    mcp_parser.add_argument("--allow-discogs", action="store_true",
+                            help="Expose read-only Discogs release lookups")
     installer = commands.add_parser("install-nicotine-plugin", help="Install Spliff Search for Nicotine+")
     installer.add_argument("--upgrade", action="store_true", help="Update an existing Spliff Search plugin")
     installer.add_argument("--plugins-dir", type=Path,
                            default=Path.home() / ".local/share/nicotine/plugins")
     commands.add_parser("nicotine-status", help="Check whether the Nicotine+ bridge is available")
+    commands.add_parser("discogs-setup", help="Open a one-time local Discogs setup page")
     for action in ("protect", "unprotect"):
         commands.add_parser(action).add_argument("id", type=int)
     staged = commands.add_parser("stage", help="Record a lossless comparison for manual review")
@@ -39,6 +43,9 @@ def main():
     args = parser.parse_args()
     db = args.db.expanduser().resolve()
     try:
+        if args.command == "discogs-setup":
+            setup_discogs()
+            return 0
         if args.command == "scan":
             root = args.root.expanduser()
             if not root.is_dir():
@@ -52,13 +59,14 @@ def main():
             print(json.dumps(request("status")))
             return 0
         if args.command == "mcp" and args.search_only and not args.allow_downloads:
-            mcp.serve(None, search_only=True)
+            mcp.serve(None, search_only=True, allow_discogs=args.allow_discogs)
             return 0
         initialize(db)
         if args.command == "serve":
             web.serve(db, args.port)
         elif args.command == "mcp":
-            mcp.serve(db, search_only=args.search_only, allow_downloads=args.allow_downloads)
+            mcp.serve(db, search_only=args.search_only, allow_downloads=args.allow_downloads,
+                      allow_discogs=args.allow_discogs)
         elif args.command == "stage":
             print(f"Staged review #{stage(db, args.id, args.candidate.expanduser())}")
         else:

@@ -22,6 +22,7 @@
         <div class="advanced-menu">
           <button id="browse" aria-pressed="false">Track index</button>
           <button id="staged" aria-pressed="false">Staged reviews</button>
+          <button id="open-settings" type="button">Settings</button>
         </div>
       </details>
     </nav>
@@ -143,13 +144,29 @@
       </div>
       <p id="candidate-status" role="status"></p>
     </dialog>
+    <dialog id="settings-dialog" aria-labelledby="settings-heading">
+      <div class="dialog-heading">
+        <h2 id="settings-heading">Settings</h2>
+        <button id="close-settings" type="button">Close</button>
+      </div>
+      <form id="replacement-settings">
+        <label>When I choose Replace
+          <select id="replace-destination" disabled>
+            <option value="trash">Move originals to Mac Trash</option>
+            <option value="hidden">Keep originals in a hidden recovery folder</option>
+          </select>
+        </label>
+        <button type="submit" disabled>Save</button>
+      </form>
+      <p id="settings-status" role="status"></p>
+    </dialog>
     <dialog id="keep-both-dialog" aria-labelledby="keep-both-heading">
       <div class="dialog-heading">
         <h2 id="keep-both-heading">Use the FLAC album</h2>
       </div>
       <div id="album-actions-description">
         <p><strong>Keep both</strong> moves the MP3s into a visible <code>MP3</code> subfolder.</p>
-        <p><strong>Replace</strong> shows only the FLACs in Spliff and saves the original MP3s in a recovery folder.</p>
+        <p><strong>Replace</strong> installs the FLACs and moves the original MP3s to the destination in Settings.</p>
       </div>
       <div id="album-action-preview" hidden>
         <p id="keep-both-summary"></p>

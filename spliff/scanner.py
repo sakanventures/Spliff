@@ -6,7 +6,7 @@ from contextlib import closing
 from pathlib import Path
 from uuid import uuid4
 
-from .catalog import EXTENSIONS, connect, find_probe, initialize, read_audio, signature
+from .catalog import EXTENSIONS, connect, file_identity, find_probe, initialize, read_audio, signature
 
 AUDIO_FIELDS = ("title", "artist", "album", "codec", "format", "quality",
                 "duration", "bitrate", "sample_rate", "bits")
@@ -25,7 +25,7 @@ def scan(db, root, progress=None):
     initialize(db)
     token = uuid4().hex
     counts = dict(probed=0, cached=0, errors=0, missing=0)
-    root_name = str(root)
+    scan_name = str(root)
 
     def walk_error(error):
         raise error
@@ -33,19 +33,30 @@ def scan(db, root, progress=None):
     with closing(connect(db)) as connection, connection:
         connection.execute("BEGIN IMMEDIATE")
         root_info = root.stat()
-        identity = (root_info.st_dev, root_info.st_ino)
+        identity = file_identity(root_info)
         roots = connection.execute("SELECT path,device,inode FROM roots").fetchall()
+        library = root
+        children = []
         for prior in roots:
             prior_path = Path(prior["path"])
-            if prior_path == root:
-                if tuple(prior)[1:] != identity:
+            if inside(root, prior_path) or inside(prior_path, root):
+                info = prior_path.stat()
+                if file_identity(info) != tuple(prior)[1:]:
                     raise ValueError("The library root changed identity. Verify the mounted drive.")
-            elif inside(prior_path, root) or inside(root, prior_path):
-                raise ValueError("Library roots cannot overlap")
+                if inside(root, prior_path):
+                    library = prior_path
+                else:
+                    children.append(prior_path)
+        root_name = str(library)
         connection.execute("INSERT OR IGNORE INTO roots VALUES (?,?,?)", (root_name, *identity))
+        for child in children:
+            prefix = str(child.relative_to(library)) + "/"
+            connection.execute("UPDATE tracks SET root=?, path=? || path WHERE root=?",
+                               (root_name, prefix, str(child)))
+            connection.execute("DELETE FROM roots WHERE path=?", (str(child),))
         for folder, directories, files, folder_fd in os.fwalk(root, onerror=walk_error, follow_symlinks=False):
             folder_info = os.fstat(folder_fd)
-            if folder == root_name and (folder_info.st_dev, folder_info.st_ino) != identity:
+            if folder == scan_name and file_identity(folder_info) != identity:
                 raise ValueError("The library root changed during scan")
             directories[:] = sorted(name for name in directories if not name.startswith("."))
             for name in sorted(files):
@@ -54,7 +65,7 @@ def scan(db, root, progress=None):
                 info = os.stat(name, dir_fd=folder_fd, follow_symlinks=False)
                 if not stat.S_ISREG(info.st_mode):
                     continue
-                path = str((Path(folder) / name).relative_to(root))
+                path = str((Path(folder) / name).relative_to(library))
                 path.encode("utf-8")
                 fingerprint = signature(info)
                 previous = connection.execute("""
@@ -88,9 +99,13 @@ def scan(db, root, progress=None):
                 if progress and examined % 100 == 0:
                     progress(dict(counts))
         ending = root.stat()
-        if (ending.st_dev, ending.st_ino) != identity:
+        if file_identity(ending) != identity:
             raise ValueError("The library root changed during scan")
-        counts["missing"] = connection.execute(
-            "UPDATE tracks SET present=0 WHERE root=? AND present=1 AND seen<>?",
-            (root_name, token)).rowcount
+        missing_sql = "UPDATE tracks SET present=0 WHERE root=? AND present=1 AND seen IS NOT ?"
+        parameters = (root_name, token)
+        if root != library:
+            prefix = str(root.relative_to(library)) + "/"
+            missing_sql += " AND substr(path,1,?)=?"
+            parameters += (len(prefix), prefix)
+        counts["missing"] = connection.execute(missing_sql, parameters).rowcount
     return counts

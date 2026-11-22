@@ -19,6 +19,17 @@ function encoding(track) {
     .filter(Boolean).join(' · ') || 'Unknown';
 }
 
+function candidateDetails(candidate) {
+  const bytes = candidate.total_bytes;
+  const size = bytes > 0 ? (bytes / (bytes >= 1e9 ? 1e9 : 1e6)).toFixed(1) +
+    (bytes >= 1e9 ? ' GB' : ' MB') : 'Size unknown';
+  const qualities = (candidate.quality || []).map(quality =>
+    (quality.sample_rate ? quality.sample_rate / 1000 + ' kHz' : 'kHz unknown') + ' / ' +
+    (quality.bit_depth ? quality.bit_depth + ' bit' : 'bit depth unknown'));
+  return size + ' · ' + (qualities.length > 1 ? 'Mixed: ' : '') +
+    (qualities.join(', ') || 'Quality unknown') + ' (peer reported)';
+}
+
 function trackRow(track) {
   const row = document.createElement('tr');
   const name = document.createElement('td');
@@ -260,20 +271,31 @@ get('soulseek-form').addEventListener('submit', async event => {
     const {candidates} = await action('/api/album-search?' + new URLSearchParams({q: get('soulseek-query').value}));
     if (request !== sourceRequest) return;
     const options = candidates.filter(candidate => candidate.candidate_id && candidate.flac_files === candidate.matching_files);
-    options.sort((first, second) => Math.abs(first.flac_files - album.total) - Math.abs(second.flac_files - album.total));
+    options.sort((first, second) => (second.total_bytes || 0) - (first.total_bytes || 0));
     status.textContent = options.length ? 'Choose a FLAC download. Spliff checks it against your album after it finishes.' :
       'No FLAC albums found. Try adding the artist or changing the search.';
-    list.replaceChildren(...options.slice(0, 3).map(candidate => {
+    let visible = 0;
+    const moreRow = element('li');
+    const more = element('button', 'View more');
+    moreRow.append(more);
+    const showMore = () => {
+      moreRow.remove();
+      list.append(...options.slice(visible, visible + 5).map(candidate => {
       const row = element('li');
       const title = element('div');
       title.append(element('strong', candidate.folder.split('\\').pop() || album.album),
-        element('small', candidate.flac_files + ' FLAC tracks found · ' + candidate.peer, 'muted'));
+        element('small', candidate.flac_files + ' FLAC tracks found · ' + candidate.peer + ' · ' + candidateDetails(candidate), 'muted'));
       const button = element('button', 'Download', 'primary');
       button.setAttribute('aria-label', 'Download FLACs from ' + candidate.peer);
       button.addEventListener('click', () => queueAlbum(candidate, album));
       row.append(title, button);
       return row;
-    }));
+      }));
+      visible += 5;
+      if (visible < options.length) list.append(moreRow);
+    };
+    more.addEventListener('click', showMore);
+    showMore();
   } catch (error) {
     if (request === sourceRequest) status.textContent = error.message;
   } finally {
@@ -365,7 +387,7 @@ function showDownload(result, job) {
   keptComparison = eligible ? {candidate: job.id, original: result.comparison.original_track_id} : null;
   const note = get('download-note');
   let message = '';
-  if (kept) message = kept.mode === 'replace' ? 'FLACs are in use. The original MP3s are in the recovery folder.' :
+  if (kept) message = kept.mode === 'replace' ? 'FLACs are in use.' :
     'Both versions were saved. The original MP3s are in the MP3 folder.';
   else if (result.comparison?.album_mismatch) message = 'Choose the matching album in your library.';
   else if (review.some(item => item.original?.protected)) message = 'This album includes protected tracks.';
@@ -497,7 +519,8 @@ async function previewAlbumAction(mode) {
     const plan = await api('/api/keep-both?' + query);
     if (!keepDialog.open || request !== keepPreviewRequest) return;
     get('keep-both-summary').textContent = 'Copy ' + plan.count + ' FLACs into ' + plan.album +
-      (replace ? ' and save the original MP3s in the recovery folder.' : ' and move the original MP3s into MP3.');
+      (replace ? (plan.archive === 'Mac Trash' ? ' and move the original MP3s to the Mac Trash.' :
+        ' and move the original MP3s into the hidden recovery folder.') : ' and move the original MP3s into MP3.');
     get('flac-destination').textContent = plan.destination;
     get('mp3-destination').textContent = plan.archive;
     keepStatus.textContent = '';
@@ -525,11 +548,14 @@ keepConfirm.addEventListener('click', async () => {
   try {
     const result = await action('/api/keep-both?' + keepParameters);
     keepDialog.close();
-    const installed = replace ? 'FLACs are now in use. Original MP3s are in the recovery folder.' :
+    const installed = replace ? (result.trash_pending ?
+      'FLACs are now in use. The Mac Trash move failed. MP3s are still at ' + result.trash_pending :
+      (result.archive === 'Mac Trash' ? 'FLACs are now in use. Original MP3s are in the Mac Trash.' :
+        'FLACs are now in use. Original MP3s are in the hidden recovery folder.')) :
       'Both versions saved. Original MP3s are in the album’s MP3 folder.';
     const cleanup = result.staging_removed === result.count ? 'Download copy removed.' :
       'Some download files remain in staging.';
-    notice([installed, cleanup, result.work_cleanup_pending && 'A temporary work folder remains.']
+    notice([installed, cleanup, result.work_cleanup_pending && !result.trash_pending && 'A temporary work folder remains.']
       .filter(Boolean).join(' '));
     refreshSummary();
     loadTracks();
@@ -565,6 +591,39 @@ get('browse').addEventListener('click', () => view('tracks'));
 get('staged').addEventListener('click', () => view('reviews'));
 get('downloads').addEventListener('click', () => view('downloads'));
 get('albums').addEventListener('click', () => showAlbumLibrary());
+
+const settingsDialog = get('settings-dialog');
+const settingsForm = get('replacement-settings');
+const replacementSelect = get('replace-destination');
+const saveSettings = settingsForm.querySelector('button');
+const settingsStatus = get('settings-status');
+
+get('open-settings').addEventListener('click', async () => {
+  settingsDialog.showModal();
+  get('advanced').open = false;
+  replacementSelect.disabled = saveSettings.disabled = true;
+  settingsStatus.textContent = 'Loading settings…';
+  try {
+    replacementSelect.value = (await api('/api/replacement-preference')).destination;
+    replacementSelect.disabled = saveSettings.disabled = false;
+    settingsStatus.textContent = '';
+  } catch (error) {
+    settingsStatus.textContent = error.message;
+  }
+});
+get('close-settings').addEventListener('click', () => settingsDialog.close());
+settingsForm.addEventListener('submit', async event => {
+  event.preventDefault();
+  replacementSelect.disabled = saveSettings.disabled = true;
+  try {
+    await action('/api/replacement-preference?' + new URLSearchParams({destination: replacementSelect.value}));
+    settingsStatus.textContent = 'Saved.';
+  } catch (error) {
+    settingsStatus.textContent = error.message;
+  } finally {
+    replacementSelect.disabled = saveSettings.disabled = false;
+  }
+});
 function refreshSummary() {
   api('/api/summary').then(data => {
     for (const key of ['tracks', 'lossless', 'lossy', 'protected']) get(key).textContent = data[key].toLocaleString();

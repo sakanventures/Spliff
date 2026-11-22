@@ -8,7 +8,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
 
-from .catalog import albums, stats, tracks
+from .catalog import albums, replacement_preference, stats, tracks
 from . import keep_both
 from .nicotine import search
 from .review import protect, reviews, stage
@@ -38,6 +38,8 @@ def serve(db, port):
                                            after=int(params.get("after", 0))))
                 elif url.path == "/api/summary":
                     self.reply_json(stats(db))
+                elif url.path == "/api/replacement-preference":
+                    self.reply_json(replacement_preference(db))
                 elif url.path == "/api/albums":
                     self.reply_json(albums(db, params.get("q", "")))
                 elif url.path == "/api/downloads":
@@ -71,6 +73,11 @@ def serve(db, port):
                 return
             try:
                 parts = urlsplit(self.path).path.strip("/").split("/")
+                if parts == ["api", "replacement-preference"]:
+                    self.body_length(0)
+                    params = parse_qs(urlsplit(self.path).query, max_num_fields=1)
+                    self.reply_json(replacement_preference(db, params.get("destination", [""])[0]))
+                    return
                 if parts == ["api", "keep-both"]:
                     self.body_length(0)
                     params = parse_qs(urlsplit(self.path).query, max_num_fields=4)
@@ -90,7 +97,7 @@ def serve(db, port):
                 if parts == ["api", "album-search"]:
                     self.body_length(0)
                     query = parse_qs(urlsplit(self.path).query, max_num_fields=1).get("q", [""])[0]
-                    self.reply_json(search(db, query, kind="album", limit=10))
+                    self.reply_json(search(db, query, kind="album", limit=None))
                     return
                 if parts == ["api", "scan"]:
                     if self.body_length(0):
