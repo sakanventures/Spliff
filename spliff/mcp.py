@@ -9,6 +9,7 @@ from .discogs_auth import connect_discogs
 from .review import reviews
 from .nicotine import search as search_nicotine
 from .staged_downloads import queue, review_download
+from .spectral import analyze_track, analyze_download
 
 
 ALBUM_CHOICE = "Do you want to keep both albums, or replace the old album with the new one?"
@@ -63,6 +64,9 @@ NICOTINE_TOOL = (
 )
 
 TOOLS = [
+    ("analyze_library_spectrum", "Generate a local full-track spectrogram for an indexed track. "
+     "Frequency content is evidence for visual review, not proof of source authenticity.",
+     {"track_id": {"type": "integer", "minimum": 1}}, analyze_track),
     ("library_summary", "Count indexed tracks by quality and preservation status.", {}, stats),
     ("search_library", "Search local metadata and relative paths. Use the next cursor for more.",
      {"query": {"type": "string", "maxLength": 300},
@@ -73,6 +77,11 @@ TOOLS = [
      {}, lambda db: {"items": reviews(db)}),
 ]
 DOWNLOAD_TOOLS = [
+    ("analyze_download_spectrum", "Generate a spectrogram for one completed download and its matched "
+     "original when available. Review before Keep both or Replace. Index is zero-based. "
+     "Do not infer genuine lossless provenance from spectral content alone.",
+     {"candidate_id": {"type": "string"}, "index": {"type": "integer", "minimum": 0},
+      "original_track_id": {"type": "integer", "minimum": 1}}, analyze_download),
     ("replacement_preference",
      "Read where Replace puts originals. Set it only if the user explicitly requests Mac Trash or a "
      "hidden recovery folder. Changing the preference never moves existing files.",
@@ -108,6 +117,7 @@ DISCOGS_TOOLS = [
      {"release_id": {"type": "integer", "minimum": 1}}, release_details),
 ]
 REQUIRED = {"search_nicotine": ["query"], "search_discogs_releases": ["artist", "title"],
+            "analyze_library_spectrum": ["track_id"], "analyze_download_spectrum": ["candidate_id"],
             "get_discogs_release": ["release_id"], "stage_nicotine_download": ["candidate_id"],
             "review_nicotine_download": ["candidate_id"]}
 WRITES = {"stage_nicotine_download", "connect_discogs", "replacement_preference"}
@@ -174,7 +184,16 @@ def serve(db, search_only=False, allow_downloads=False, allow_discogs=False):
                 continue
             try:
                 payload = tool[3](db, **arguments)
-                result = {"content": [{"type": "text", "text": json.dumps(payload)}]}
+                if tool[0] in ("analyze_library_spectrum", "analyze_download_spectrum"):
+                    sources = {"original": payload} if "image_base64" in payload else payload
+                    content = []
+                    for label, source in sources.items():
+                        content.append({"type": "text", "text": json.dumps({"source": label,
+                            **{key: value for key, value in source.items() if key != "image_base64"}})})
+                        content.append({"type": "image", "mimeType": "image/png", "data": source["image_base64"]})
+                    result = {"content": content}
+                else:
+                    result = {"content": [{"type": "text", "text": json.dumps(payload)}]}
             except (ValueError, OSError, sqlite3.Error) as exc:
                 message = str(exc) if isinstance(exc, ValueError) else "Catalog unavailable"
                 result = {"isError": True, "content": [{"type": "text", "text": message}]}

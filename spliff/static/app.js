@@ -53,6 +53,9 @@ function trackRow(track) {
   });
   actions.append(protection);
   if (track.present && !track.error) {
+    const spectrum = element('button', 'Spectrum');
+    spectrum.addEventListener('click', () => showTrackSpectrum(track));
+    actions.append(spectrum);
     const compare = element('button', 'Compare file');
     compare.addEventListener('click', () => chooseCandidate(track));
     const match = element('button', 'Compare with download');
@@ -305,6 +308,9 @@ get('soulseek-form').addEventListener('submit', async event => {
 
 function selectDownload(job) {
   if (selectedDownload?.id !== job.id) {
+    get('download-spectrum').hidden = true;
+    get('download-spectrum').replaceChildren();
+    delete get('download-spectrum').dataset.selection;
     get('download-report').replaceChildren();
     get('download-original').textContent = '';
     get('download-comparison').hidden = true;
@@ -347,6 +353,7 @@ async function loadDownloads(selected, quiet = false) {
     if (job) selectDownload(job);
     else {
       selectedDownload = null;
+      get('download-spectrum').hidden = true;
       downloadRequest++;
       get('download-heading').hidden = true;
       get('download-comparison').hidden = true;
@@ -366,6 +373,15 @@ async function loadDownloads(selected, quiet = false) {
 
 function showDownload(result, job) {
   const review = result.items;
+  const spectrum = get('download-spectrum');
+  const spectrumKey = job.id + ':' + (result.comparison?.original_track_id || '');
+  if (!result.kept_both && result.complete && spectrum.dataset.selection !== spectrumKey) {
+    spectrum.dataset.selection = spectrumKey;
+    spectrumViewer(spectrum, review.map((item, index) => ({title: item.audio?.title || item.name, index}))
+      .filter(choice => review[choice.index].audio), choice => ({candidate: job.id, index: choice.index,
+        ...(result.comparison ? {original: result.comparison.original_track_id} : {})}));
+  }
+  if (result.kept_both) spectrum.hidden = true;
   const matched = review.filter(item => item.assessment === 'possible match').length;
   const count = result.complete + ' of ' + review.length + ' tracks downloaded';
   const progress = get('download-progress');
@@ -737,3 +753,91 @@ async function scanMusic() {
 get('scan').addEventListener('click', scanMusic);
 get('add-library').addEventListener('click', scanMusic);
 view('albums');
+
+// One graph, one track selector, one source switch. Analysis stays on this Mac.
+function spectrumViewer(container, choices, parameters) {
+  if (!choices.length) { container.hidden = true; return; }
+  const picker = element('select');
+  picker.setAttribute('aria-label', 'Track to analyze');
+  choices.forEach((choice, index) => {
+    const option = element('option', choice.title);
+    option.value = index;
+    picker.append(option);
+  });
+  const toolbar = element('div', '', 'spectrum-toolbar');
+  const toggle = element('div', '', 'spectrum-switch');
+  const buttons = {};
+  let data = null;
+  let selected = 'download';
+  let serial = 0;
+  const metadata = element('small');
+  const status = element('p', 'Analyzing…');
+  status.setAttribute('role', 'status');
+  const canvas = document.createElement('canvas');
+  canvas.setAttribute('role', 'img');
+  const paint = async () => {
+    const source = data?.[selected];
+    if (!source) return;
+    const request = serial;
+    const encoded = atob(source.image_base64);
+    const bytes = Uint8Array.from(encoded, char => char.charCodeAt(0));
+    const image = await createImageBitmap(new Blob([bytes], {type: 'image/png'}));
+    if (request !== serial || source !== data?.[selected]) { image.close(); return; }
+    canvas.width = image.width;
+    canvas.height = image.height;
+    canvas.getContext('2d').drawImage(image, 0, 0);
+    image.close();
+    canvas.setAttribute('aria-label', source.name + ': frequency over time, color indicates level in dBFS');
+    canvas.title = source.method + '. ' + source.conclusion;
+    metadata.textContent = encoding(source.audio);
+    metadata.title = source.method + '. ' + source.conclusion;
+    for (const [key, button] of Object.entries(buttons)) {
+      button.hidden = !data[key];
+      button.setAttribute('aria-pressed', key === selected);
+    }
+    canvas.hidden = metadata.hidden = false;
+  };
+  for (const [key, label] of [['original', 'Original'], ['download', 'Download']]) {
+    const button = element('button', label);
+    button.type = 'button';
+    button.hidden = true;
+    button.addEventListener('click', () => { selected = key; paint().catch(error => { status.textContent = error.message; }); });
+    buttons[key] = button;
+    toggle.append(button);
+  }
+  toolbar.append(picker, toggle);
+  container.replaceChildren(toolbar, metadata, status, canvas);
+  container.hidden = false;
+  const load = async () => {
+    const request = ++serial;
+    data = null;
+    canvas.hidden = metadata.hidden = true;
+    Object.values(buttons).forEach(button => { button.hidden = true; });
+    status.textContent = 'Analyzing…';
+    const query = new URLSearchParams(parameters(choices[Number(picker.value)]));
+    try {
+      const result = await api('/api/spectrum?' + query);
+      if (request !== serial || !container.isConnected) return;
+      data = result;
+      if (!data[selected]) selected = data.download ? 'download' : 'original';
+      status.textContent = '';
+      await paint();
+    } catch (error) {
+      if (request === serial) status.textContent = error.message;
+    }
+  };
+  picker.addEventListener('change', load);
+  load();
+}
+
+function showTrackSpectrum(track) {
+  const dialog = element('dialog', '', 'spectrum-dialog');
+  const close = element('button', 'Close', 'spectrum-close');
+  close.addEventListener('click', () => dialog.close());
+  const graph = element('section', '', 'spectrum');
+  dialog.append(close, graph);
+  document.body.append(dialog);
+  dialog.addEventListener('close', () => dialog.remove(), {once: true});
+  dialog.showModal();
+  spectrumViewer(graph, [{title: track.title || track.path.split('/').pop(), id: track.id}], choice => ({track: choice.id}));
+}

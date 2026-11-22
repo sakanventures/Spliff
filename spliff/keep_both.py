@@ -17,6 +17,7 @@ from .nicotine_bridge.downloads import selection_parts
 from .nicotine_bridge.wire import staging_root
 from .scanner import AUDIO_FIELDS
 from .staged_downloads import review_download
+from .spectral import analyze_file
 
 WORK_DIR = ".spliff-keep-both"
 MP3_FOLDER = "MP3"
@@ -96,6 +97,11 @@ def get_plan(db, candidate, original, mode="keep"):
     largest = max(max(copies), *(pair["mp3_sig"][0] for pair in pairs))
     if sum(copies) + largest > shutil.disk_usage(folder).free:
         raise ValueError("There is not enough free space to copy the FLAC album.")
+    # Decode and render every pair before offering confirmation, and revalidate on apply.
+    # This establishes readable spectral evidence, never an authenticity verdict.
+    for pair in pairs:
+        analyze_file(pair["mp3"], pair["mp3_sig"])
+        analyze_file(pair["flac"], pair["flac_sig"])
     return {"candidate": candidate, "root": str(root), "folder": str(folder),
             "album": review["comparison"]["album"], "mode": mode, "pairs": pairs,
             "original_mode": original_mode,

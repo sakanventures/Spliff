@@ -121,3 +121,15 @@ dialog::backdrop { background: #060906bd; }
 .keep-destinations div + div { margin-top: 12px; }
 .keep-destinations dd { margin: 4px 0 0; font-size: .82rem; font-weight: 400; letter-spacing: 0; overflow-wrap: anywhere; }
 .album-dialog-footer { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; }
+
+.spectrum { background: #08090b; border: 1px solid var(--edge); border-radius: 10px; margin-block: 16px; padding: 12px; color: #eee; }
+.spectrum-toolbar { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
+.spectrum-toolbar select { max-width: 100%; min-width: 0; flex: 1; }
+.spectrum-switch { display: flex; gap: 4px; }
+.spectrum-switch button { padding: 6px 10px; font-size: .8rem; }
+.spectrum canvas { display: block; width: 100%; height: auto; margin-top: 10px; }
+.spectrum small { font-size: .75rem; color: #aaa; margin-top: 8px; }
+.spectrum p { margin: 8px 0; font-size: .82rem; }
+.spectrum-dialog { width: min(1200px, 94vw); max-width: 94vw; padding: 12px; }
+.spectrum-dialog .spectrum { margin: 0; border: 0; }
+.spectrum-close { display: block; margin-left: auto; }

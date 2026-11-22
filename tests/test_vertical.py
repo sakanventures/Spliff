@@ -209,6 +209,21 @@ class VerticalSlice(unittest.TestCase):
         return indexed, report
 
     @unittest.skipUnless(sys.platform == "darwin", "Requires exclusive macOS rename")
+    def test_spectral_failure_blocks_destination_preview_without_moving_files(self):
+        indexed, report = self.keep_both_fixture()
+        staged = Path(report["items"][0]["source"])
+        original_bytes = self.original.read_bytes()
+        staged_bytes = staged.read_bytes()
+        with patch("spliff.keep_both.review_download", return_value=report), \
+                patch("spliff.keep_both.analyze_file", side_effect=ValueError("Decode failed")):
+            with self.assertRaisesRegex(ValueError, "Decode failed"):
+                keep_both.preview(self.db, self.album_selection, indexed["id"], "replace")
+        self.assertEqual(self.original.read_bytes(), original_bytes)
+        self.assertEqual(staged.read_bytes(), staged_bytes)
+        self.assertFalse((self.root / "MP3").exists())
+        self.assertFalse(self.original.with_suffix(".flac").exists())
+
+    @unittest.skipUnless(sys.platform == "darwin", "Requires exclusive macOS rename")
     def test_keep_both_requires_confirmation_then_preserves_audio(self):
         original_bytes = self.original.read_bytes()
         candidate_bytes = self.candidate.read_bytes()
@@ -391,7 +406,7 @@ class VerticalSlice(unittest.TestCase):
         initialized, listing, called = map(json.loads, output.stdout.splitlines())
         self.assertEqual(initialized["result"]["protocolVersion"], "2025-11-25")
         self.assertEqual(initialized["result"]["serverInfo"]["title"], "Spliff")
-        self.assertEqual(len(listing["result"]["tools"]), 4)
+        self.assertEqual(len(listing["result"]["tools"]), 5)
         payload = json.loads(called["result"]["content"][0]["text"])
         self.assertEqual(payload["items"][0]["title"], "Rare 100%")
         with subprocess.Popen(command + ["serve", "--port", "0"], stdout=subprocess.PIPE, text=True) as server:

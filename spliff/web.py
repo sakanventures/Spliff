@@ -13,6 +13,7 @@ from . import keep_both
 from .nicotine import search
 from .review import protect, reviews, stage
 from .scanner import scan
+from .spectral import analyze_track, analyze_download
 from .staged_downloads import list_downloads, queue, review_download
 
 MAX_CANDIDATE_BYTES = 512 * 1024 * 1024
@@ -58,6 +59,17 @@ def serve(db, port):
                         self.reply_json({"error": str(exc)}, 400)
                 elif url.path == "/api/reviews":
                     self.reply_json({"items": reviews(db)})
+                elif url.path == "/api/spectrum":
+                    try:
+                        if params.get("candidate"):
+                            self.reply_json(analyze_download(db, params["candidate"],
+                                int(params.get("index", 0)),
+                                int(params["original"]) if params.get("original") else None))
+                        else:
+                            self.reply_json({"original": analyze_track(db, int(params.get("track", 0)))})
+                    except (ValueError, OSError, subprocess.SubprocessError) as exc:
+                        self.reply_json({"error": str(exc) if isinstance(exc, ValueError)
+                                         else "Spectral analysis unavailable. No files were changed."}, 422)
                 else:
                     self.send_error(404)
             except ValueError:

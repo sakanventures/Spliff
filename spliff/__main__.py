@@ -11,6 +11,7 @@ from .discogs_auth import setup_discogs
 from .review import protect, stage
 from .nicotine import install_plugin, request
 from .scanner import scan
+from .spectral import analyze_track
 
 def main():
     parser = argparse.ArgumentParser(prog="Spliff")
@@ -19,6 +20,8 @@ def main():
     commands = parser.add_subparsers(dest="command", required=True)
     scan_parser = commands.add_parser("scan", help="Index a music folder read-only")
     scan_parser.add_argument("root", type=Path)
+    spectrum = commands.add_parser("spectrum", help="Analyze an indexed track locally")
+    spectrum.add_argument("id", type=int)
     ui = commands.add_parser("serve", help="Open the local read-only dashboard")
     ui.add_argument("--port", type=int, default=8765)
     mcp_parser = commands.add_parser("mcp", help="Expose Spliff tools over stdio")
@@ -64,6 +67,8 @@ def main():
         initialize(db)
         if args.command == "serve":
             web.serve(db, args.port)
+        elif args.command == "spectrum":
+            print(json.dumps(analyze_track(db, args.id)))
         elif args.command == "mcp":
             mcp.serve(db, search_only=args.search_only, allow_downloads=args.allow_downloads,
                       allow_discogs=args.allow_discogs)
