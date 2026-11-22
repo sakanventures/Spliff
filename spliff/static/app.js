@@ -66,6 +66,11 @@ function trackRow(track) {
     });
     actions.append(compare, match);
   }
+  if (companion) {
+    const menu = element('details');
+    menu.append(element('summary', 'Actions'), ...actions.children);
+    actions.append(menu);
+  }
   row.append(name, element('td', track.album || '—'), element('td', encoding(track)), element('td', status), actions);
   return row;
 }
@@ -136,7 +141,6 @@ async function loadReviews() {
 
 function view(page) {
   document.body.dataset.view = page;
-  window.webkit?.messageHandlers?.libraryPage?.postMessage(page);
   get('advanced').open = false;
   for (const [id, key, panel] of [['albums', 'albums', 'albums-panel'], ['browse', 'tracks', 'index'],
     ['staged', 'reviews', 'review-panel'], ['downloads', 'downloads', 'downloads-panel']]) {
@@ -146,7 +150,10 @@ function view(page) {
   if (page === 'albums' && !get('album-library').hidden) loadAlbums();
   if (page === 'tracks') { refreshSummary(); loadTracks(); }
   if (page === 'reviews') loadReviews();
-  if (page === 'downloads') loadDownloads();
+  if (page === 'downloads') {
+    if (companion) showDownloadList();
+    loadDownloads();
+  }
   else { downloadRequest++; downloadListRequest++; clearTimeout(downloadTimer); }
 }
 
@@ -228,14 +235,10 @@ function openAlbumSearch(album) {
 }
 
 function showAlbumLibrary(comparing = false) {
-  if (!comparing && window.webkit?.messageHandlers?.libraryPage) {
-    window.webkit.messageHandlers.libraryPage.postMessage('library');
-    return;
-  }
   currentAlbum = null;
   sourceRequest++;
   choosingDownloadOriginal = comparing;
-  get('albums-heading').textContent = comparing ? 'Which album should Spliff compare?' : 'What album do you want to upgrade?';
+  get('albums-heading').textContent = comparing ? 'Which album should Spliff compare?' : companion ? 'Upgrade an album' : 'What album do you want to upgrade?';
   get('album-library').hidden = false;
   get('album-search').hidden = true;
   view('albums');
@@ -312,7 +315,23 @@ get('soulseek-form').addEventListener('submit', async event => {
   }
 });
 
-function selectDownload(job) {
+function showDownloadList() {
+  get('downloads-panel').classList.remove('show-download');
+  get('download-back').hidden = true;
+}
+
+get('download-back').addEventListener('click', () => {
+  showDownloadList();
+  get('download-list').querySelector('[aria-pressed="true"]')?.focus();
+});
+
+function selectDownload(job, open = false) {
+  if (companion && open) {
+    get('action-status').hidden = true;
+    get('downloads-panel').classList.add('show-download');
+    get('download-back').hidden = false;
+    get('download-back').focus();
+  }
   if (selectedDownload?.id !== job.id) {
     get('download-spectrum').hidden = true;
     get('download-spectrum').replaceChildren();
@@ -323,13 +342,15 @@ function selectDownload(job) {
     get('download-note').hidden = true;
     get('download-details').hidden = true;
     get('download-details').open = false;
+    get('download-spectrum-details').open = false;
   }
   selectedDownload = job;
   get('download-heading').hidden = false;
   get('download-title').textContent = job.title;
   get('download-source').textContent = job.peer;
   get('download-progress').max = job.total;
-  get('download-progress').value = job.total;
+  get('download-progress').hidden = false;
+  get('download-progress').removeAttribute('value');
   for (const button of get('download-list').querySelectorAll('button')) {
     button.setAttribute('aria-pressed', button.dataset.job === job.id);
   }
@@ -348,15 +369,25 @@ async function loadDownloads(selected, quiet = false) {
     list.replaceChildren(...items.map(job => {
       const button = element('button', '', 'download-job');
       button.dataset.job = job.id;
-      button.append(element('strong', job.title), element('small', job.peer + ' · ' + job.total + ' tracks'));
+      const title = element('span');
+      title.append(element('strong', job.title), element('small', job.total + ' tracks'));
+      button.append(title);
+      if (companion) button.append(element('span', 'Review →', 'download-open'));
       button.addEventListener('click', () => {
         downloadOriginal = null;
-        selectDownload(job);
+        selectDownload(job, true);
       });
       return button;
     }));
+    if (companion && !items.length) {
+      list.append(element('p', 'Completed Nicotine+ downloads will appear here.', 'download-empty'));
+    }
     const job = items.find(item => item.id === (selected || selectedDownload?.id)) || items[0];
-    if (job) selectDownload(job);
+    if (job && (!companion || selected || downloadOriginal || get('downloads-panel').classList.contains('show-download'))) {
+      selectDownload(job, companion && Boolean(selected || downloadOriginal));
+    } else if (job) {
+      selectedDownload = null;
+    }
     else {
       selectedDownload = null;
       get('download-spectrum').hidden = true;
@@ -367,9 +398,14 @@ async function loadDownloads(selected, quiet = false) {
       get('download-note').hidden = true;
       get('download-details').hidden = true;
       get('download-status').textContent = 'No completed downloads yet.';
+      if (companion) showDownloadList();
     }
   } catch (error) {
-    if (request === downloadListRequest && !quiet) get('download-status').textContent = error.message;
+    if (request === downloadListRequest && !quiet) {
+      if (companion && !get('downloads-panel').classList.contains('show-download')) {
+        get('download-list').replaceChildren(element('p', error.message, 'download-empty'));
+      } else get('download-status').textContent = error.message;
+    }
   } finally {
     if (request === downloadListRequest && !get('downloads-panel').hidden) {
       downloadTimer = setTimeout(() => loadDownloads(null, true), 8000);
@@ -381,17 +417,21 @@ function showDownload(result, job) {
   const review = result.items;
   const spectrum = get('download-spectrum');
   const spectrumKey = job.id + ':' + (result.comparison?.original_track_id || '');
-  if (!result.kept_both && result.complete && spectrum.dataset.selection !== spectrumKey) {
+  const spectrumDetails = get('download-spectrum-details');
+  spectrumDetails.hidden = Boolean(result.kept_both) || !review.some(item => item.audio);
+  spectrumDetails.ontoggle = () => {
+    if (!spectrumDetails.open || spectrumDetails.hidden || spectrum.dataset.selection === spectrumKey) return;
     spectrum.dataset.selection = spectrumKey;
     spectrumViewer(spectrum, review.map((item, index) => ({title: item.audio?.title || item.name, index}))
       .filter(choice => review[choice.index].audio), choice => ({candidate: job.id, index: choice.index,
         ...(result.comparison ? {original: result.comparison.original_track_id} : {})}));
-  }
-  if (result.kept_both) spectrum.hidden = true;
+  };
+  if (spectrumDetails.open) spectrumDetails.ontoggle();
   const matched = review.filter(item => item.assessment === 'possible match').length;
   const count = result.complete + ' of ' + review.length + ' tracks downloaded';
   const progress = get('download-progress');
   progress.value = result.complete;
+  progress.hidden = companion && result.complete === review.length;
   get('download-status').textContent = count + (result.comparison && !result.comparison.album_mismatch ? ' · ' + matched + ' possible matches' : '');
   const candidateAlbum = review.find(item => item.audio?.album)?.audio.album;
   get('download-title').textContent = candidateAlbum || job.title;
@@ -399,13 +439,15 @@ function showDownload(result, job) {
   const kept = result.kept_both;
   get('download-original').textContent = kept ? (kept.mode === 'replace' ? 'FLACs in use' : 'Both versions saved') :
     result.comparison?.album || downloadOriginal?.title || 'No album selected';
-  get('choose-original').textContent = 'Choose comparison album';
+  get('choose-original').textContent = companion && result.comparison?.album ?
+    'Change album' : 'Choose comparison album';
   get('choose-original').hidden = Boolean(kept);
   const eligible = !kept && result.kind === 'album' && result.complete === review.length &&
     matched === review.length && !result.originals_without_match.length &&
     review.every(item => item.audio?.codec === 'flac' && item.original?.codec === 'mp3' &&
       !item.original.protected);
   get('keep-both').hidden = !eligible;
+  if (companion) get('keep-both').textContent = 'Review upgrade';
   keptComparison = eligible ? {candidate: job.id, original: result.comparison.original_track_id} : null;
   const note = get('download-note');
   let message = '';
@@ -413,7 +455,10 @@ function showDownload(result, job) {
     'Both versions were saved. The original MP3s are in the MP3 folder.';
   else if (result.comparison?.album_mismatch) message = 'Choose the matching album in your library.';
   else if (review.some(item => item.original?.protected)) message = 'This album includes protected tracks.';
-  else if (result.comparison && !eligible && result.kind === 'album') message = 'Review the track details before using this download.';
+  else if (result.comparison && !eligible && result.kind === 'album') {
+    message = companion ? 'Spliff couldn’t match every track. Open Track details to see what needs review.' :
+      'Review the track details before using this download.';
+  }
   note.textContent = message;
   note.hidden = !message;
   get('download-details').hidden = false;
@@ -471,6 +516,7 @@ async function refreshDownload() {
       get('download-note').hidden = true;
       get('download-details').hidden = true;
       get('download-status').textContent = '';
+      if (companion) { showDownloadList(); await loadDownloads(); }
       return;
     }
     showDownload(result, job);
@@ -735,6 +781,10 @@ document.addEventListener('drop', event => {
 });
 
 async function scanMusic() {
+  if (companion) {
+    window.webkit.messageHandlers.spliffMac.postMessage('chooseMusic');
+    return;
+  }
   get('scan').disabled = true;
   get('add-library').disabled = true;
   notice('Choose a music folder in Finder.');
@@ -758,14 +808,20 @@ async function scanMusic() {
 
 get('scan').addEventListener('click', scanMusic);
 get('add-library').addEventListener('click', scanMusic);
-const initialPage = new URLSearchParams(location.search);
-const companion = Boolean(window.webkit?.messageHandlers?.libraryPage);
-if (companion) document.documentElement.classList.add('companion');
-view(companion && ['tracks', 'downloads', 'reviews'].includes(initialPage.get('page')) ? initialPage.get('page') : 'albums');
-if (companion && initialPage.get('preferences') === '1') {
-  settingsDialog.addEventListener('close', () => showAlbumLibrary(), {once: true});
-  get('open-settings').click();
+const companion = Boolean(window.webkit?.messageHandlers?.spliffMac);
+if (companion) {
+  document.documentElement.classList.add('companion');
+  get('browse').textContent = 'Find individual tracks';
+  get('staged').textContent = 'Saved file comparisons';
+  get('albums-heading').textContent = 'Upgrade an album';
+  get('add-music-mac').hidden = false;
+  get('add-music-mac').addEventListener('click', () => {
+    get('advanced').open = false;
+    scanMusic();
+  });
+  get('open-settings').hidden = true;
 }
+view('albums');
 
 // One graph, one track selector, one source switch. Analysis stays on this Mac.
 function spectrumViewer(container, choices, parameters) {

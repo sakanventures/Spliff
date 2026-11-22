@@ -1,85 +1,45 @@
+import Combine
 import SwiftUI
 import WebKit
 
 struct ContentView: View {
     @EnvironmentObject var model: CompanionModel
-    @StateObject private var workspace = LibraryWorkspace()
+
     var body: some View {
-        ZStack {
+        Group {
             if model.dashboardReady {
-                NavigationSplitView {
-                    List(selection: Binding<LibraryPage?>(
-                        get: { workspace.section },
-                        set: { if let page = $0 { workspace.navigate(page, base: model.dashboardURL) } }
-                    )) {
-                        ForEach(LibraryPage.allCases) { page in
-                            Label(page.title, systemImage: page.symbol).tag(page)
-                        }
-                    }
-                    .navigationSplitViewColumnWidth(min: 140, ideal: 160, max: 215)
-                } detail: {
-                    if let route = workspace.webRoute {
-                        DashboardView(url: route, album: workspace.albumToOpen, workspace: workspace)
-                            .id(route).navigationTitle(workspace.section.title)
-                    } else {
-                        AlbumTable(workspace: workspace).navigationTitle("Albums")
-                    }
+                DashboardView(url: model.dashboardURL, model: model)
+                    .id(model.revision)
+            } else {
+                VStack(alignment: .leading, spacing: 18) {
+                    Text("Connect Spliff").font(.largeTitle.bold())
+                    ConnectionView()
                 }
-                .id(model.revision)
-                .opacity(model.settingsOpen ? 0 : 1)
-                .accessibilityHidden(model.settingsOpen)
-                .allowsHitTesting(!model.settingsOpen)
-            }
-            if model.settingsOpen {
-                VStack(alignment: .leading, spacing: 0) {
-                    HStack {
-                        Text("Settings").font(.headline)
-                        Spacer()
-                        Button { model.settingsOpen = false } label: { Image(systemName: "xmark") }
-                            .buttonStyle(.bordered).help("Close settings").accessibilityLabel("Close settings")
-                            .keyboardShortcut(.cancelAction)
-                    }.padding(20)
-                    ScrollView {
-                        VStack(alignment: .leading, spacing: 20) {
-                            ConnectionView()
-                            if model.dashboardReady {
-                                Divider()
-                                Button("Replacement preferences…") {
-                                    model.settingsOpen = false
-                                    workspace.navigate(.albums, base: model.dashboardURL, preferences: true)
-                                }
-                            }
-                        }.frame(maxWidth: 420).padding(30)
-                            .frame(maxWidth: .infinity)
-                    }
-                }
-            } else if !model.dashboardReady {
-                ConnectionView().frame(maxWidth: 420).padding(40)
-                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .frame(maxWidth: 360)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .background(Color(nsColor: .windowBackgroundColor))
         .toolbar {
-            ToolbarItem(placement: .automatic) {
-                Label(model.connected ? "Connected" : "Offline", systemImage: model.connected ? "circle.fill" : "circle")
-                    .foregroundStyle(model.connected ? .green : .secondary).font(.caption)
-            }
             ToolbarItem(placement: .primaryAction) {
-                Button(action: model.chooseMusic) { Label("Choose music", systemImage: "folder.badge.plus") }
-                    .disabled(model.busy || model.connecting || !model.runtimeAvailable)
-            }
-            ToolbarItem(placement: .primaryAction) {
-                Button { model.settingsOpen.toggle() } label: { Label("Settings", systemImage: "gearshape") }
+                Button("Settings", systemImage: "gearshape") { model.settingsOpen = true }
+                    .help("Settings")
             }
         }
-        .safeAreaInset(edge: .bottom) {
-            if !model.settingsOpen && model.dashboardReady && (model.busy || !model.message.isEmpty) {
+        .sheet(isPresented: $model.settingsOpen) {
+            SpliffSettings()
+                .environmentObject(model)
+        }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            if model.dashboardReady && (model.busy || !model.message.isEmpty) {
                 HStack {
                     if model.busy { ProgressView().controlSize(.small) }
-                    Text(model.message).font(.caption).textSelection(.enabled)
+                    Text(model.message).textSelection(.enabled)
                     Spacer()
-                    if !model.busy { Button { model.message = "" } label: { Image(systemName: "xmark") }.buttonStyle(.plain).accessibilityLabel("Dismiss") }
-                }.padding(10).background(.bar)
+                    if !model.busy {
+                        Button("Dismiss", systemImage: "xmark") { model.message = "" }
+                            .labelStyle(.iconOnly).buttonStyle(.plain)
+                    }
+                }.padding(12).background(.bar)
             }
         }
         .task {
@@ -89,6 +49,84 @@ struct ContentView: View {
             }
         }
     }
+}
+
+private struct SpliffSettings: View {
+    @EnvironmentObject var model: CompanionModel
+    @Environment(\.dismiss) private var dismiss
+    @StateObject private var preference = ReplacementPreference()
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 22) {
+            HStack {
+                Text("Settings").font(.title2.bold())
+                Spacer()
+                Button("Done") { dismiss() }.keyboardShortcut(.cancelAction)
+            }
+            if model.dashboardReady {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("After replacing an album").font(.headline)
+                    Picker("Original files", selection: $preference.destination) {
+                        Text("Move to Mac Trash").tag("trash")
+                        Text("Move to hidden recovery folder").tag("hidden")
+                    }.disabled(preference.saved == nil || preference.busy)
+                    Text("Spliff uses this setting after you choose Replace and confirm where the files will go.")
+                        .foregroundStyle(.secondary)
+                    HStack {
+                        Button("Save preference") { Task { await preference.load(base: model.dashboardURL, save: true) } }
+                            .buttonStyle(.borderedProminent)
+                            .disabled(preference.saved == nil || preference.destination == preference.saved || preference.busy)
+                        if preference.busy { ProgressView().controlSize(.small) }
+                        Text(preference.status).foregroundStyle(.secondary)
+                        if preference.saved == nil && !preference.busy {
+                            Button("Retry") { Task { await preference.load(base: model.dashboardURL) } }
+                        }
+                    }
+                }
+                Divider()
+            }
+            DisclosureGroup("ChatGPT connection") { ConnectionView().padding(.top, 12) }
+        }
+        .padding(24)
+        .frame(width: 480)
+        .task(id: model.dashboardReady) {
+            if model.dashboardReady { await preference.load(base: model.dashboardURL) }
+        }
+    }
+}
+
+@MainActor
+private final class ReplacementPreference: ObservableObject {
+    @Published var destination = "trash"
+    @Published var saved: String?
+    @Published var status = ""
+    @Published var busy = true
+
+    func load(base: URL, save: Bool = false) async {
+        busy = true
+        defer { busy = false }
+        status = ""
+        guard let endpoint = URL(string: "/api/replacement-preference", relativeTo: base)?.absoluteURL else { return }
+        var request = URLRequest(url: endpoint)
+        if save {
+            request.url = endpoint.appending(queryItems: [URLQueryItem(name: "destination", value: destination)])
+            request.httpMethod = "POST"
+            request.setValue("dashboard", forHTTPHeaderField: "X-Spliff-Action")
+            request.setValue("http://127.0.0.1:\(base.port ?? 8765)", forHTTPHeaderField: "Origin")
+        }
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw URLError(.badServerResponse) }
+            let value = try JSONDecoder().decode(Preference.self, from: data).destination
+            destination = value
+            saved = value
+            if save { status = "Saved" }
+        } catch {
+            status = save ? "Couldn’t save the preference." : "Couldn’t load the preference."
+        }
+    }
+
+    private struct Preference: Decodable { let destination: String }
 }
 
 struct ConnectionView: View {
@@ -128,46 +166,45 @@ struct ConnectionView: View {
 
 struct DashboardView: NSViewRepresentable {
     let url: URL
-    let album: LibraryAlbum?
-    let workspace: LibraryWorkspace
-    func makeCoordinator() -> Coordinator { Coordinator(origin: url, album: album, workspace: workspace) }
+    let model: CompanionModel
+
+    func makeCoordinator() -> Coordinator { Coordinator(model: model) }
+
     func makeNSView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
-        configuration.userContentController.add(context.coordinator, name: "libraryPage")
+        configuration.userContentController.add(context.coordinator, name: "spliffMac")
         let web = WKWebView(frame: .zero, configuration: configuration)
         web.navigationDelegate = context.coordinator
-        web.underPageBackgroundColor = .windowBackgroundColor
         web.load(URLRequest(url: url))
         return web
     }
+
     func updateNSView(_ nsView: WKWebView, context: Context) {}
+
     final class Coordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
-        let origin: URL
-        let album: LibraryAlbum?
-        let workspace: LibraryWorkspace
-        init(origin: URL, album: LibraryAlbum?, workspace: LibraryWorkspace) {
-            self.origin = origin
-            self.album = album
-            self.workspace = workspace
-        }
-        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-            guard let album, let data = try? JSONEncoder().encode(album),
-                  let object = try? JSONSerialization.jsonObject(with: data) else { return }
-            Task {
-                do { _ = try await webView.callAsyncJavaScript("openAlbumSearch(album)", arguments: ["album": object], in: nil, contentWorld: .page) }
-                catch { self.workspace.error = error.localizedDescription; self.workspace.webRoute = nil }
-            }
-        }
+        weak var model: CompanionModel?
+
+        init(model: CompanionModel) { self.model = model }
+
         func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
-            guard message.frameInfo.isMainFrame, message.frameInfo.securityOrigin.host == origin.host,
-                  message.frameInfo.securityOrigin.port == origin.port,
-                  let page = message.body as? String else { return }
-            if page == "library" { workspace.navigate(.albums, base: origin) }
-            else if let section = LibraryPage(rawValue: page) { workspace.section = section }
+            guard let model else { return }
+            let url = model.dashboardURL
+            guard
+                  message.frameInfo.isMainFrame,
+                  message.frameInfo.securityOrigin.protocol == url.scheme,
+                  message.frameInfo.securityOrigin.host == url.host,
+                  message.frameInfo.securityOrigin.port == url.port,
+                  message.body as? String == "chooseMusic",
+                  !model.busy, !model.connecting, model.runtimeAvailable else { return }
+            model.chooseMusic()
         }
+
         func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction,
                      decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
-            guard let url = action.request.url else { decisionHandler(.cancel); return }
+            guard let url = action.request.url, let origin = model?.dashboardURL else {
+                decisionHandler(.cancel)
+                return
+            }
             if url.scheme == origin.scheme && url.host == origin.host && url.port == origin.port {
                 decisionHandler(.allow)
             } else {

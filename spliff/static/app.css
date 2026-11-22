@@ -139,25 +139,51 @@ dialog::backdrop { background: #060906bd; }
 .embedded .hero { padding-top: 12px; }
 .embedded h1 { font-size: clamp(1.8rem, 4vw, 3rem); }
 
-/* Review surfaces share the companion's system appearance. */
+/* The Mac workspace uses the same actions in a compact, single-column layout. */
 .companion {
-  color-scheme: light dark;
-  font: 13px -apple-system, system-ui, sans-serif;
-  color: CanvasText; background: Canvas;
-  --panel: Canvas; --muted: GrayText; --edge: color-mix(in srgb, CanvasText 16%, Canvas);
-  --accent: AccentColor;
+  background: #151815;
+  --panel: #1b201b;
+  --edge: #363e36;
+  --muted: #b3beb2;
+  font-size: 14px;
 }
-.companion nav { display: none; }
-.companion main { width: 100%; padding: 12px 16px; }
-.companion #albums-panel { width: 100%; }
-.companion .hero, .companion #album-library .hero { padding: 12px 0; text-align: left; }
-.companion h1, .companion #selected-album-title { font-size: 19px; letter-spacing: normal; }
-.companion button, .companion input, .companion select { background: Field; color: FieldText; padding: 4px 8px; border-radius: 5px; font-weight: 400; }
-.companion .primary, .companion button[aria-pressed="true"] { background: Highlight; color: HighlightText; }
-.companion th { background: Canvas; }
-.companion .panel, .companion .album-list { border-radius: 3px; }
-.companion .album-list li, .companion td, .companion th { padding: 7px 10px; }
-.companion .metrics { margin-bottom: 12px; }
-.companion .metrics div { padding: 6px 10px; border: 0; }
-.companion .metrics dd { font-size: 17px; }
-.companion :focus-visible { outline-color: Highlight; }
+.companion main { width: min(calc(100% - 72px), 760px); padding: 26px 0 48px; }
+.companion nav { margin: 0; padding-bottom: 14px; border-bottom: 1px solid var(--edge); }
+.companion nav > button { background: transparent; color: var(--muted); border-color: transparent; }
+.companion nav > button[aria-pressed="true"] { background: #2b3628; color: var(--accent); }
+.companion #advanced { margin-left: auto; }
+.companion .hero, .companion #album-library .hero { padding: 32px 0 20px; text-align: left; }
+.companion h1, .companion #selected-album-title, .companion #download-title {
+  font-size: clamp(30px, 4.5vw, 44px);
+  letter-spacing: -.045em;
+  line-height: 1.1;
+}
+.companion .album-list li { padding: 14px 18px; }
+.companion .album-list strong, .companion .download-job strong { font-size: 15px; }
+.companion .album-list button { background: transparent; }
+.companion #albums-panel, .companion #downloads-panel { margin-top: 14px; }
+.companion #downloads-panel { border: 0; background: transparent; overflow: visible; }
+.companion .download-layout { display: block; min-height: 0; }
+.companion .download-sidebar, .companion .download-sidebar-heading { border: 0; }
+.companion .download-sidebar-heading, .companion .download-detail { padding: 20px 0; }
+.companion .download-sidebar-heading h2 { font-size: 34px; letter-spacing: -.04em; margin: 0 0 8px; }
+.companion #download-list { border-top: 1px solid var(--edge); }
+.companion .download-job {
+  display: flex; gap: 16px; align-items: center; justify-content: space-between;
+  padding: 16px 2px; border-top: 0; border-bottom: 1px solid var(--edge);
+  background: transparent; color: inherit;
+}
+.companion .download-job:hover { background: var(--panel); }
+.companion .download-open { color: var(--accent); white-space: nowrap; }
+.companion .download-job small, .companion .download-empty { color: var(--muted); }
+.companion #downloads-panel:not(.show-download) .download-detail,
+.companion #downloads-panel.show-download .download-sidebar { display: none; }
+.companion .download-title { margin-top: 22px; }
+.companion .download-comparison { padding: 16px 0; }
+.companion #download-details { border-top: 1px solid var(--edge); margin-top: 16px; }
+.companion .back-link, .companion #album-back { background: transparent; color: var(--accent); }
+.companion #album-back { margin-top: 16px; }
+.companion .metrics { display: none; }
+.companion #index, .companion #review-panel { margin-top: 22px; }
+.companion .track-actions details button { margin: 6px 0 0; }
+.companion #action-status { margin-top: 14px; }
