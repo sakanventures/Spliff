@@ -68,5 +68,36 @@ dialog::backdrop { background: #060906bd; }
 #drop-zone.dragging { border-color: var(--accent); background: #233524; }
 #drop-zone p { margin: 0 0 12px; }
 #choose-candidate { color: #152014; background: var(--accent); }
-#download-report { padding: 0 18px 14px; overflow-wrap: anywhere; }
-#download-report li { margin-block: .5rem; }
+#download-report { overflow-wrap: anywhere; }
+.download-layout { display: grid; grid-template-columns: minmax(220px, 29%) minmax(0, 1fr); min-height: 390px; }
+.download-sidebar { border-right: 1px solid var(--edge); }
+.download-sidebar-heading, .download-detail { padding: 18px; }
+.download-sidebar h2, .download-title h2 { margin: 0 0 8px; }
+.download-sidebar h2 { font-size: 1.06rem; }
+.download-sidebar summary { color: var(--accent); cursor: pointer; padding-block: 7px; }
+.download-sidebar form { padding: 10px 0 0; align-items: stretch; flex-direction: column; }
+.download-sidebar input { min-width: 0; }
+.download-job { width: 100%; color: inherit; text-align: left; border-radius: 0; border: 0; border-top: 1px solid var(--edge); padding: 14px 18px; overflow-wrap: anywhere; }
+.download-job small { opacity: .8; }
+.download-title, .download-comparison { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; }
+.download-title p { margin: 0; }
+.download-detail progress { width: 100%; height: 8px; accent-color: var(--accent); margin-top: 15px; }
+.download-comparison { border-top: 1px solid var(--edge); padding: 12px 0; }
+.download-comparison small { color: var(--muted); margin: 0 0 5px; }
+#download-report { padding: 0; }
+#download-report table { min-width: 540px; }
+#download-report td, #download-report th { padding-inline: 10px; }
+@media (max-width: 700px) {
+  .download-layout { grid-template-columns: minmax(0, 1fr); }
+  .download-sidebar { border-right: 0; border-bottom: 1px solid var(--edge); }
+}
+
+body[data-view="downloads"] .hero,
+body[data-view="downloads"] .metrics { display: none; }
+body[data-view="downloads"] main { padding-top: 22px; }
+.comparison-actions, .dialog-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.dialog-actions { justify-content: flex-end; }
+.primary { background: var(--accent); border-color: var(--accent); color: #152014; }
+.keep-destinations { margin: 16px 0; padding: 12px; border: 1px solid var(--edge); border-radius: 8px; }
+.keep-destinations div + div { margin-top: 12px; }
+.keep-destinations dd { margin: 4px 0 0; font-size: .82rem; font-weight: 400; letter-spacing: 0; overflow-wrap: anywhere; }

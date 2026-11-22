@@ -64,8 +64,14 @@ Try asking the connected chat to find up to three possible lossless editions of 
 
 Ask Spliff Search for candidate IDs. Choose the specific track or peer folder you intend to download, then paste its ID into **Downloads → Queue to staging** on the local dashboard. IDs expire after ten minutes or when Nicotine+ restarts. A repeated queue request for the same saved ID returns its existing job. Spliff queues the observed audio files, one per numbered staging subfolder, and keeps the job under `~/Library/Application Support/Spliff/Staged downloads`. Nicotine+ still manages pending transfers and its incomplete files.
 
-Use **Check download** to see available files. To compare against the library, select **Match download** on one original track, then select the job. For albums, Spliff compares with the tagged album in that track's indexed folder. It checks actual audio metadata and highlights unmatched originals and preservation flags. A possible match remains a metadata assessment.
+Open **Downloads** and select the album by title and peer. A download appears automatically when every selected file has finished. Nicotine+ shows pending or failed transfers. Spliff suggests the matching indexed album when one edition fits the downloaded metadata. Use **Change original** to find and select a different indexed album. It checks actual audio metadata and highlights unmatched originals and preservation flags. A possible match remains a metadata assessment.
 
 An existing bridge needs `spliff install-nicotine-plugin --upgrade` followed by toggling **Spliff Search** off and on in Nicotine+. The bridge preserves Nicotine+ transfer filters. Turn off configured post-download commands and keep the staging and incomplete folders outside indexed library roots before queueing.
 
 The ChatGPT connection can stay search-only while the dashboard handles queueing. Operators who explicitly want chat queueing can start MCP with `--allow-downloads` and refresh the custom plugin's tools. Point the MCP process at the intended catalog with `--db` before the subcommand. Downloads stay in staging for review.
+
+### Keep both versions
+
+For an album with a complete one-to-one FLAC match against unprotected MP3 originals, click **Keep both**. The confirmation shows the exact album directory and its `MP3` subfolder before applying the change.
+
+Spliff copies the staged FLACs into the album directory and moves the original MP3s into `MP3`, preserving their indexed IDs. Staged files remain available. Existing destinations and protected originals block the operation. If the Mac loses power during the operation, a hidden `.spliff-keep-both` directory in the album folder can contain the recovery plan. Review it before retrying.

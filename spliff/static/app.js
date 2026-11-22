@@ -44,7 +44,7 @@ function trackRow(track) {
   if (track.present && !track.error) {
     const compare = element('button', 'Compare file');
     compare.addEventListener('click', () => chooseCandidate(track));
-    const match = element('button', 'Match download');
+    const match = element('button', 'Compare with download');
     match.addEventListener('click', () => {
       downloadOriginal = track;
       view('downloads');
@@ -120,6 +120,7 @@ async function loadReviews() {
 }
 
 function view(page) {
+  document.body.dataset.view = page;
   for (const [id, key, panel] of [['browse', 'tracks', 'index'],
     ['staged', 'reviews', 'review-panel'], ['downloads', 'downloads', 'downloads-panel']]) {
     get(id).setAttribute('aria-pressed', page === key);
@@ -127,29 +128,150 @@ function view(page) {
   }
   if (page === 'reviews') loadReviews();
   if (page === 'downloads') loadDownloads();
+  else { downloadRequest++; downloadListRequest++; clearTimeout(downloadTimer); }
 }
 
 let downloadOriginal = null;
 let downloadRequest = 0;
+let downloadTimer;
+let downloadListRequest = 0;
+let selectedDownload = null;
+let downloadJobs = [];
+let keptComparison = null;
 
-async function loadDownloads(selected) {
-  const request = ++downloadRequest;
-  const picker = get('download-picker');
-  const previous = selected || picker.value;
-  get('download-report').replaceChildren();
-  get('download-original').textContent = downloadOriginal
-    ? 'Compare against ' + (downloadOriginal.album || downloadOriginal.title || downloadOriginal.path) + '.'
-    : 'To compare with your library, use Match download on one original track.';
+function selectDownload(job) {
+  if (selectedDownload?.id !== job.id) {
+    get('download-report').replaceChildren();
+    get('download-original').textContent = '';
+    get('download-comparison').hidden = true;
+  }
+  selectedDownload = job;
+  get('download-heading').hidden = false;
+  get('download-title').textContent = job.title;
+  get('download-source').textContent = job.peer;
+  get('download-progress').max = job.total;
+  get('download-progress').value = job.total;
+  for (const button of get('download-list').querySelectorAll('button')) {
+    button.setAttribute('aria-pressed', button.dataset.job === job.id);
+  }
+  refreshDownload();
+}
+
+async function loadDownloads(selected, quiet = false) {
+  const request = ++downloadListRequest;
+  clearTimeout(downloadTimer);
   try {
     const {items} = await api('/api/downloads');
-    if (request !== downloadRequest) return;
-    picker.replaceChildren(...items.map(item => {
-      const option = element('option', item.query + ' · ' + item.id.slice(-10));
-      option.value = item.id;
-      return option;
+    if (request !== downloadListRequest) return;
+    if (quiet && items.map(item => item.id).join() === downloadJobs.map(item => item.id).join()) return;
+    downloadJobs = items;
+    const list = get('download-list');
+    list.replaceChildren(...items.map(job => {
+      const button = element('button', '', 'download-job');
+      button.dataset.job = job.id;
+      button.append(element('strong', job.title), element('small', job.peer + ' · ' + job.total + ' tracks'));
+      button.addEventListener('click', () => {
+        downloadOriginal = null;
+        selectDownload(job);
+      });
+      return button;
     }));
-    if (items.some(item => item.id === previous)) picker.value = previous;
-    get('download-status').textContent = items.length ? '' : 'No staged downloads yet.';
+    const job = items.find(item => item.id === (selected || selectedDownload?.id)) || items[0];
+    if (job) selectDownload(job);
+    else {
+      selectedDownload = null;
+      downloadRequest++;
+      get('download-heading').hidden = true;
+      get('download-comparison').hidden = true;
+      get('download-report').replaceChildren();
+      get('download-status').textContent = 'No completed downloads yet.';
+    }
+  } catch (error) {
+    if (request === downloadListRequest && !quiet) get('download-status').textContent = error.message;
+  } finally {
+    if (request === downloadListRequest && !get('downloads-panel').hidden) {
+      downloadTimer = setTimeout(() => loadDownloads(null, true), 8000);
+    }
+  }
+}
+
+function showDownload(result, job) {
+  const review = result.items;
+  const matched = review.filter(item => item.assessment === 'possible match').length;
+  const count = result.complete + ' of ' + review.length + ' tracks downloaded';
+  const progress = get('download-progress');
+  progress.value = result.complete;
+  get('download-status').textContent = count + (result.comparison && !result.comparison.album_mismatch ? ' · ' + matched + ' possible matches' : '');
+  const candidateAlbum = review.find(item => item.audio?.album)?.audio.album;
+  get('download-title').textContent = candidateAlbum || job.title;
+  get('download-comparison').hidden = !result.complete && !downloadOriginal;
+  const kept = result.kept_both;
+  get('download-original').textContent = kept ? 'Both versions saved' :
+    result.comparison?.album || downloadOriginal?.title || 'No album selected';
+  get('choose-original').textContent = 'Choose comparison album';
+  get('choose-original').hidden = Boolean(kept);
+  const eligible = !kept && result.kind === 'album' && result.complete === review.length &&
+    matched === review.length && !result.originals_without_match.length &&
+    review.every(item => item.audio?.codec === 'flac' && item.original?.codec === 'mp3' &&
+      !item.original.protected);
+  get('keep-both').hidden = !eligible;
+  keptComparison = eligible ? {candidate: job.id, original: result.comparison.original_track_id} : null;
+  const rows = review.map(item => {
+    const row = document.createElement('tr');
+    const title = element('td', item.audio?.title || item.name);
+    if (item.audio) title.append(element('small', encoding(item.audio), 'muted'));
+    const original = element('td', item.original?.title || '—');
+    if (item.original) {
+      original.append(element('small', [encoding(item.original), item.original.protected && 'Protected']
+        .filter(Boolean).join(' · '), 'muted'));
+    }
+    const status = item.assessment === 'original not selected' ? item.status : item.assessment || item.status;
+    row.append(title, original, element('td', status.charAt(0).toUpperCase() + status.slice(1)));
+    return row;
+  });
+  const table = document.createElement('table');
+  const header = document.createElement('tr');
+  for (const label of ['Download', 'In your library', 'Status']) {
+    const cell = element('th', label);
+    cell.scope = 'col';
+    header.append(cell);
+  }
+  table.createTHead().append(header);
+  table.createTBody().append(...rows);
+  const wrap = element('div', '', 'table-wrap');
+  wrap.append(table);
+  const report = get('download-report');
+  report.replaceChildren(wrap);
+  if (kept) report.prepend(element('p', 'FLACs are in the album folder. Original MP3s are in its MP3 subfolder.', 'message'));
+  if (candidateAlbum && result.comparison?.album_mismatch) {
+    report.prepend(element('p', 'This download is ' + candidateAlbum + '. Choose that album in your library to compare it.', 'message'));
+  }
+  const missing = result.originals_without_match.map(track => track.title || track.path);
+  if (missing.length) {
+    report.append(element('p', 'Original tracks to review: ' + missing.join(', '), 'message'));
+  }
+}
+
+async function refreshDownload() {
+  const job = selectedDownload;
+  if (!job || get('downloads-panel').hidden) return;
+  const request = ++downloadRequest;
+  const query = new URLSearchParams({candidate: job.id});
+  if (downloadOriginal) query.set('original', downloadOriginal.id);
+  if (!get('download-report').childElementCount) get('download-status').textContent = 'Checking download…';
+  try {
+    const result = await api('/api/download-review?' + query);
+    if (request !== downloadRequest) return;
+    if (result.complete !== result.items.length) {
+      get('download-list').querySelector('[aria-pressed="true"]')?.remove();
+      selectedDownload = null;
+      get('download-heading').hidden = true;
+      get('download-comparison').hidden = true;
+      get('download-report').replaceChildren();
+      get('download-status').textContent = '';
+      return;
+    }
+    showDownload(result, job);
   } catch (error) {
     if (request === downloadRequest) get('download-status').textContent = error.message;
   }
@@ -157,52 +279,87 @@ async function loadDownloads(selected) {
 
 get('queue-form').addEventListener('submit', async event => {
   event.preventDefault();
-  const form = event.currentTarget;
-  const submit = form.querySelector('button');
+  const submit = event.currentTarget.querySelector('button');
   submit.disabled = true;
   const input = get('download-code');
-  get('download-status').textContent = 'Queueing the selected candidate in Nicotine+…';
+  get('queue-status').textContent = 'Sending your selection to Nicotine+…';
   try {
     const result = await action('/api/downloads?' + new URLSearchParams({candidate: input.value.trim()}));
     input.value = '';
-    await loadDownloads(result.id);
-    get('download-status').textContent = 'Staging job saved. Select Check download for progress.';
+    get('queue-status').textContent = 'Sent to Nicotine+. It will appear here when complete.';
+    await loadDownloads(result.id, true);
   } catch (error) {
-    get('download-status').textContent = error.message;
+    get('queue-status').textContent = error.message;
   } finally {
     submit.disabled = false;
   }
 });
 
-get('download-review-form').addEventListener('submit', async event => {
-  event.preventDefault();
-  const request = ++downloadRequest;
-  const query = new URLSearchParams({candidate: get('download-picker').value});
-  if (downloadOriginal) query.set('original', downloadOriginal.id);
-  get('download-status').textContent = 'Checking downloads and inspecting completed files…';
-  get('download-report').replaceChildren();
+const keepDialog = get('keep-both-dialog');
+const keepStatus = get('keep-both-status');
+const keepConfirm = get('confirm-keep-both');
+let keepParameters = null;
+let keepPreviewRequest = 0;
+let applyingKeepBoth = false;
+
+get('keep-both').addEventListener('click', async () => {
+  if (!keptComparison) return;
+  const request = ++keepPreviewRequest;
+  const query = new URLSearchParams(keptComparison);
+  keepParameters = null;
+  keepConfirm.disabled = true;
+  get('keep-both-summary').textContent = '';
+  get('flac-destination').textContent = '';
+  get('mp3-destination').textContent = '';
+  keepStatus.textContent = 'Checking files and destinations…';
+  keepDialog.showModal();
   try {
-    const result = await api('/api/download-review?' + query);
-    if (request !== downloadRequest) return;
-    get('download-status').textContent = result.complete + ' of ' + result.items.length + ' staged files available.';
-    const list = document.createElement('ul');
-    for (const item of result.items) {
-      const details = [item.status, item.assessment, item.audio && encoding(item.audio),
-        item.original?.protected && 'original protected'].filter(Boolean);
-      const row = element('li', item.name + ' · ' + details.join(' · '));
-      if (item.original) {
-        row.append(element('small', 'Original: ' + (item.original.title || item.original.path) +
-          ' · ' + encoding(item.original), 'muted'));
-      }
-      list.append(row);
-    }
-    const missing = result.originals_without_match.map(track => track.title || track.path);
-    const report = get('download-report');
-    report.append(list);
-    if (missing.length) report.append(element('p', 'Originals without a confident metadata match: ' + missing.join(', ')));
+    const plan = await api('/api/keep-both?' + query);
+    if (!keepDialog.open || request !== keepPreviewRequest) return;
+    get('keep-both-summary').textContent =
+      'Copy ' + plan.count + ' FLACs into ' + plan.album + ' and move the matching MP3s into MP3.';
+    get('flac-destination').textContent = plan.destination;
+    get('mp3-destination').textContent = plan.archive;
+    keepStatus.textContent = '';
+    query.set('token', plan.token);
+    keepParameters = query;
+    keepConfirm.disabled = false;
   } catch (error) {
-    if (request === downloadRequest) get('download-status').textContent = error.message;
+    if (request === keepPreviewRequest) keepStatus.textContent = error.message;
   }
+});
+
+get('cancel-keep-both').addEventListener('click', () => keepDialog.close());
+keepDialog.addEventListener('cancel', event => { if (applyingKeepBoth) event.preventDefault(); });
+keepConfirm.addEventListener('click', async () => {
+  if (!keepParameters || applyingKeepBoth) return;
+  applyingKeepBoth = true;
+  keepConfirm.disabled = true;
+  get('cancel-keep-both').disabled = true;
+  keepStatus.textContent = 'Saving both versions…';
+  try {
+    await action('/api/keep-both?' + keepParameters);
+    keepDialog.close();
+    notice('Both versions saved. Original MP3s are in the album’s MP3 folder.');
+    refreshSummary();
+    loadTracks();
+    refreshDownload();
+  } catch (error) {
+    keepStatus.textContent = error.message;
+  } finally {
+    applyingKeepBoth = false;
+    get('cancel-keep-both').disabled = false;
+  }
+});
+
+get('reload-download').addEventListener('click', refreshDownload);
+get('choose-original').addEventListener('click', () => {
+  const job = downloadJobs.find(item => item.id === selectedDownload?.id);
+  get('search').value = job?.kind === 'album' ? get('download-title').textContent : '';
+  get('scope').value = 'all';
+  view('tracks');
+  loadTracks();
+  get('search').focus();
 });
 
 get('filters').addEventListener('submit', event => { event.preventDefault(); loadTracks(); });
@@ -321,3 +478,7 @@ get('scan').addEventListener('click', async () => {
 
 refreshSummary();
 loadTracks();
+api('/api/downloads').then(({items}) => {
+  if (items.length && !get('search').value && !get('index').hidden
+      && document.activeElement === document.body) view('downloads');
+}).catch(() => {});

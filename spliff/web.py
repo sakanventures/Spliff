@@ -9,6 +9,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from .catalog import stats, tracks
+from . import keep_both
 from .review import protect, reviews, stage
 from .scanner import scan
 from .staged_downloads import list_downloads, queue, review_download
@@ -44,6 +45,11 @@ def serve(db, port):
                         self.reply_json(review_download(db, params.get("candidate"), original))
                     except ValueError as exc:
                         self.reply_json({"error": str(exc)}, 400)
+                elif url.path == "/api/keep-both":
+                    try:
+                        self.reply_json(keep_both.preview(db, params.get("candidate"), int(params.get("original", 0))))
+                    except (FileNotFoundError, ValueError) as exc:
+                        self.reply_json({"error": str(exc)}, 400)
                 elif url.path == "/api/reviews":
                     self.reply_json({"items": reviews(db)})
                 else:
@@ -61,6 +67,14 @@ def serve(db, port):
                 return
             try:
                 parts = urlsplit(self.path).path.strip("/").split("/")
+                if parts == ["api", "keep-both"]:
+                    self.body_length(0)
+                    params = parse_qs(urlsplit(self.path).query, max_num_fields=3)
+                    self.reply_json(keep_both.apply(
+                        db, params.get("candidate", [None])[0],
+                        int(params.get("original", [0])[0]), params.get("token", [None])[0],
+                    ))
+                    return
                 if parts == ["api", "downloads"]:
                     self.body_length(0)
                     selection = parse_qs(urlsplit(self.path).query, max_num_fields=1).get("candidate", [None])[0]

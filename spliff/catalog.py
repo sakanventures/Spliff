@@ -22,7 +22,11 @@ CREATE TABLE IF NOT EXISTS tracks(
  size INTEGER, mtime INTEGER, device INTEGER, inode INTEGER, seen TEXT, error TEXT,
  protected INTEGER NOT NULL DEFAULT 0, present INTEGER NOT NULL DEFAULT 1,
  UNIQUE(root,path));
+CREATE INDEX IF NOT EXISTS tracks_album ON tracks(album COLLATE NOCASE, present);
 CREATE INDEX IF NOT EXISTS tracks_review ON tracks(present,quality,protected,id);
+CREATE TABLE IF NOT EXISTS kept_albums(
+ candidate TEXT PRIMARY KEY, destination TEXT NOT NULL,
+ created TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS reviews(
  id INTEGER PRIMARY KEY, original_id INTEGER NOT NULL REFERENCES tracks(id),
  candidate TEXT NOT NULL, snapshot TEXT NOT NULL, original_snapshot TEXT NOT NULL,

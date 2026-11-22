@@ -52,19 +52,42 @@
       <div id="reviews"></div>
       <p class="message" id="review-status" role="status"></p>
     </section>
-    <section id="downloads-panel" aria-label="Staged downloads" class="panel" hidden>
-      <form id="queue-form">
-        <label>Candidate ID from Spliff Search<input id="download-code" required maxlength="48"
-          placeholder="Paste the selected candidate ID"></label>
-        <button type="submit">Queue to staging</button>
-      </form>
-      <form id="download-review-form">
-        <label>Staged download<select id="download-picker" required></select></label>
-        <button type="submit">Check download</button>
-      </form>
-      <p class="message" id="download-original"></p>
-      <p class="message" id="download-status" role="status"></p>
-      <div id="download-report"></div>
+    <section id="downloads-panel" aria-label="Downloads" class="panel" hidden>
+      <div class="download-layout">
+        <aside class="download-sidebar" aria-label="Download list">
+          <div class="download-sidebar-heading">
+            <h2>Downloads</h2>
+            <details id="add-download">
+              <summary>Add from chat</summary>
+              <form id="queue-form">
+                <label>Candidate ID<input id="download-code" required maxlength="48"
+                  placeholder="Paste the ID from Spliff Search"></label>
+                <button type="submit">Download to staging</button>
+              </form>
+              <small id="queue-status" role="status"></small>
+            </details>
+          </div>
+          <div id="download-list"></div>
+        </aside>
+        <div class="download-detail">
+          <div id="download-heading" hidden>
+            <div class="download-title">
+              <div><h2 id="download-title"></h2><p id="download-source" class="muted"></p></div>
+              <button id="reload-download" type="button">Refresh</button>
+            </div>
+            <progress id="download-progress" max="1" value="0" aria-label="Tracks downloaded"></progress>
+          </div>
+          <p id="download-status" role="status"></p>
+          <div id="download-comparison" class="download-comparison" hidden>
+            <div><small>Compare with your library</small><strong id="download-original"></strong></div>
+            <div class="comparison-actions">
+              <button id="choose-original" type="button">Choose comparison album</button>
+              <button id="keep-both" class="primary" type="button" hidden>Keep both</button>
+            </div>
+          </div>
+          <div id="download-report"></div>
+        </div>
+      </div>
     </section>
     <dialog id="candidate-dialog" aria-labelledby="candidate-heading">
       <div class="dialog-heading">
@@ -79,7 +102,21 @@
       </div>
       <p id="candidate-status" role="status"></p>
     </dialog>
-    <footer>Music files are read-only. Preservation flags and staged comparisons live in the catalog.</footer>
+    <dialog id="keep-both-dialog" aria-labelledby="keep-both-heading">
+      <div class="dialog-heading">
+        <h2 id="keep-both-heading">Keep both versions</h2>
+      </div>
+      <p id="keep-both-summary"></p>
+      <dl class="keep-destinations">
+        <div><dt>FLAC copies</dt><dd id="flac-destination"></dd></div>
+        <div><dt>Original MP3s</dt><dd id="mp3-destination"></dd></div>
+      </dl>
+      <p id="keep-both-status" role="status"></p>
+      <div class="dialog-actions">
+        <button id="cancel-keep-both" type="button">Cancel</button>
+        <button id="confirm-keep-both" class="primary" type="button" disabled>Keep both</button>
+      </div>
+    </dialog>
   </main>
 </body>
 </html>

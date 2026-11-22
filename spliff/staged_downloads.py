@@ -5,7 +5,7 @@ import stat
 import subprocess
 import unicodedata
 from contextlib import closing
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from time import monotonic
 
 from .catalog import connect, find_probe, read_audio, signature
@@ -30,18 +30,41 @@ def public_status(result):
     }
 
 
+def staged_file_present(folder, entry):
+    directory = folder / entry["directory"]
+    if directory.parent != folder or directory.is_symlink() or not directory.is_dir():
+        return False
+    suffix = PureWindowsPath(entry["remote"]).suffix.casefold()
+    for candidate in directory.iterdir():
+        info = candidate.lstat()
+        if (stat.S_ISREG(info.st_mode) and candidate.suffix.casefold() == suffix
+                and info.st_size == entry["bytes"]):
+            return True
+    return False
+
+
 def list_downloads():
     root = staging_root()
     if not root.is_dir() or root.resolve() != root:
         return []
     folders = (folder for folder in root.iterdir() if SELECTION.fullmatch(folder.name) and not folder.is_symlink())
     jobs = []
-    for folder in sorted(folders, key=lambda item: item.stat().st_mtime, reverse=True)[:30]:
+    for folder in sorted(folders, key=lambda item: item.stat().st_mtime, reverse=True):
         try:
             manifest = read_job(folder)
+            entries = manifest["entries"]
+            if not entries or not all(staged_file_present(folder, entry) for entry in entries):
+                continue
         except (ValueError, OSError):
             continue
-        jobs.append({key: manifest[key] for key in ("id", "query", "kind", "created")})
+        entry = entries[0]
+        remote = PureWindowsPath(entry["remote"])
+        title = (remote.parent.name if manifest["kind"] == "album" else remote.stem)
+        jobs.append({**{key: manifest[key] for key in ("id", "query", "kind", "created")},
+                     "title": title or manifest["query"], "peer": entry["peer"],
+                     "total": len(entries)})
+        if len(jobs) >= 30:
+            break
     return jobs
 
 
@@ -67,12 +90,15 @@ def filename_number(name):
     return int(match.group(1)) if match else None
 
 
+ORIGINAL_FIELDS = "id,path,artist,album,title,codec,quality,duration,protected"
+
+
 def originals(db, track_id, kind):
     if track_id is None:
         return []
     if type(track_id) is not int or not 0 < track_id < 2**63:
         raise ValueError("Choose a valid original track ID.")
-    fields = "id,path,artist,album,title,codec,quality,duration,protected"
+    fields = ORIGINAL_FIELDS
     with closing(connect(db)) as connection:
         row = connection.execute(
             f"SELECT root,{fields} FROM tracks WHERE id=? AND present=1 AND error IS NULL",
@@ -99,7 +125,7 @@ def inspect_file(binary, directory, relative, timeout):
         raise ValueError("Unexpected staging file type.")
     parent = os.open(candidate.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
-        return read_audio(binary, parent, candidate.name, signature(info), timeout)
+        return read_audio(binary, parent, candidate.name, signature(info), timeout), signature(info)
     finally:
         os.close(parent)
 
@@ -135,13 +161,43 @@ def match_item(item, indexed, kind, filename):
     return "possible match", original
 
 
-def review_download(db, candidate_id=None, original_track_id=None):
+def suggest_album(db, items):
+    completed = [item for item in items if item.get("audio", {}).get("quality") == "lossless"]
+    albums = {item["audio"]["album"] for item in completed if item["audio"]["album"]}
+    if len(albums) != 1:
+        return []
+    with closing(connect(db)) as connection:
+        rows = connection.execute(f"""
+            SELECT root,{ORIGINAL_FIELDS} FROM tracks
+            WHERE album=? COLLATE NOCASE AND present=1 AND error IS NULL ORDER BY path
+        """, (next(iter(albums)),)).fetchall()
+    groups = {}
+    for row in rows:
+        key = (row["root"], Path(row["path"]).parent)
+        groups.setdefault(key, []).append({name: row[name] for name in row.keys() if name != "root"})
+    ranked = []
+    for group in groups.values():
+        matches = set()
+        for item in completed:
+            assessment, original = match_item(item["audio"], group, "album", item["name"])
+            if assessment == "possible match":
+                matches.add(original["id"])
+        if len(matches) >= min(2, len(completed)):
+            ranked.append(group)
+    return ranked[0] if len(ranked) == 1 else []
+
+
+def review_download(db, candidate_id=None, original_track_id=None, *, include_sources=False):
     selection_parts(candidate_id)
     result = request("download_status", selection=candidate_id)
     indexed = originals(db, original_track_id, result["kind"])
     directory = staging_root() / candidate_id
     binary = find_probe() if result["complete"] else None
     report = public_status(result)
+    with closing(connect(db)) as connection:
+        kept = connection.execute("SELECT destination FROM kept_albums WHERE candidate=?",
+                                  (candidate_id,)).fetchone()
+    report["kept_both"] = dict(kept) if kept else None
     possible = set()
     deadline = monotonic() + 35
     for transfer, item in zip(result["items"], report["items"]):
@@ -152,11 +208,30 @@ def review_download(db, candidate_id=None, original_track_id=None):
             item["assessment"] = "inspection time limit reached"
             continue
         try:
-            metadata = inspect_file(binary, directory, transfer["file"], min(remaining, 3))
+            metadata, fingerprint = inspect_file(binary, directory, transfer["file"], min(remaining, 3))
         except (OSError, ValueError, IndexError, KeyError, subprocess.SubprocessError):
             item["assessment"] = "audio inspection failed"
             continue
         item["audio"] = metadata
+        if include_sources:
+            item["source"] = str(directory / transfer["file"])
+            item["fingerprint"] = fingerprint
+    suggested = original_track_id is None and result["kind"] == "album"
+    if suggested:
+        indexed = suggest_album(db, report["items"])
+    report["comparison"] = ({"album": indexed[0]["album"], "suggested": suggested,
+                              "original_track_id": indexed[0]["id"]} if indexed else None)
+    tagged_albums = {title_key(item["audio"]["album"]) for item in report["items"]
+                     if item.get("audio", {}).get("album")}
+    selected_album = indexed[0]["album"] if indexed else None
+    if result["kind"] == "album" and selected_album and tagged_albums and title_key(selected_album) not in tagged_albums:
+        report["comparison"]["album_mismatch"] = True
+        report["originals_without_match"] = []
+        return report
+    for item in report["items"]:
+        if "audio" not in item:
+            continue
+        metadata = item["audio"]
         item["assessment"], original = match_item(metadata, indexed, result["kind"], item["name"])
         if original:
             item["original"] = original
