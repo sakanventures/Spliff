@@ -30,6 +30,24 @@ CREATE TABLE IF NOT EXISTS kept_albums(
  created TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS download_comparisons(
  candidate TEXT PRIMARY KEY, original_id INTEGER NOT NULL REFERENCES tracks(id));
+CREATE TABLE IF NOT EXISTS transfer_reviews(
+ candidate TEXT PRIMARY KEY, report TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS transfer_preparations(
+ candidate TEXT PRIMARY KEY, prepared TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE IF NOT EXISTS upgrade_plans(
+ token TEXT PRIMARY KEY, candidate TEXT NOT NULL, mode TEXT NOT NULL,
+ original_id INTEGER NOT NULL, preview TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS upgrade_results(
+ candidate TEXT PRIMARY KEY, result TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS edition_evidence(
+ candidate TEXT PRIMARY KEY, metadata_key TEXT NOT NULL, evidence TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS sync_folders(
+ root TEXT PRIMARY KEY, selected TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE IF NOT EXISTS sync_targets(
+ root TEXT NOT NULL, original_id INTEGER NOT NULL REFERENCES tracks(id),
+ kind TEXT NOT NULL, query TEXT NOT NULL, candidate TEXT,
+ state TEXT NOT NULL DEFAULT 'queued', detail TEXT,
+ PRIMARY KEY(root,original_id));
 CREATE TABLE IF NOT EXISTS preferences(key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS reviews(
  id INTEGER PRIMARY KEY, original_id INTEGER NOT NULL REFERENCES tracks(id),
@@ -68,6 +86,10 @@ def initialize(db):
         with connection:
             connection.execute("BEGIN IMMEDIATE")
             columns = {row["name"] for row in connection.execute("PRAGMA table_info(kept_albums)")}
+            track_columns = {row["name"] for row in connection.execute("PRAGMA table_info(tracks)")}
+            for column in ("track_number", "disc_number"):
+                if column not in track_columns:
+                    connection.execute(f"ALTER TABLE tracks ADD COLUMN {column} TEXT")
             if "mode" not in columns:
                 connection.execute("ALTER TABLE kept_albums ADD COLUMN mode TEXT NOT NULL DEFAULT 'keep'")
 
@@ -88,7 +110,7 @@ def probe(binary, descriptor, timeout=30):
         [binary, "-v", "error", "-protocol_whitelist", "file", "-format_whitelist",
          "mp3,flac,wav,aiff,mov,aac,ogg,ape,wv,asf,dsf,iff", "-select_streams", "a:0",
          "-show_entries", "stream=codec_name,duration,bit_rate,sample_rate,bits_per_raw_sample,bits_per_sample:"
-         "stream_tags=title,artist,album:format=format_name,duration,bit_rate:format_tags=title,artist,album",
+         "stream_tags=title,artist,album,track,disc:format=format_name,duration,bit_rate:format_tags=title,artist,album,track,disc",
          "-of", "json", "-i", f"/dev/fd/{descriptor}"],
         capture_output=True, check=True, timeout=timeout, pass_fds=(descriptor,),
     )
@@ -116,6 +138,7 @@ def probe(binary, descriptor, timeout=30):
         return None
 
     return dict(title=tags.get("title"), artist=tags.get("artist"), album=tags.get("album"),
+                track_number=tags.get("track"), disc_number=tags.get("disc"),
                 codec=codec, format=container.get("format_name"), quality=quality,
                 duration=number("duration", float), bitrate=number("bit_rate"),
                 sample_rate=number("sample_rate"),

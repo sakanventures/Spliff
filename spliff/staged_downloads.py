@@ -1,14 +1,17 @@
 """Queue a specific search offer and inspect its downloaded files for review."""
+import json
 import os
 import re
 import stat
 import subprocess
 import unicodedata
-from contextlib import closing
+from contextlib import closing, nullcontext
 from pathlib import Path, PureWindowsPath
 from time import monotonic
 
 from .catalog import connect, find_probe, read_audio, signature
+from .artist import release_folder
+from .discogs import release_details, search_releases
 from .nicotine import request
 from .nicotine_bridge.downloads import SELECTION, read_job, selection_parts
 from .nicotine_bridge.wire import staging_root
@@ -22,6 +25,12 @@ def queue(db, candidate_id=None, *, original_id=None):
             raise ValueError("Choose an indexed album to compare.")
     with closing(connect(db)) as connection:
         roots = [row["path"] for row in connection.execute("SELECT path FROM roots")]
+    if original_id is not None:
+        with closing(connect(db)) as connection, connection:
+            connection.execute("""
+                INSERT INTO download_comparisons(candidate, original_id) VALUES (?, ?)
+                ON CONFLICT(candidate) DO UPDATE SET original_id=excluded.original_id
+            """, (candidate_id, original_id))
     try:
         result = request("queue", selection=candidate_id, roots=roots)
     except ValueError as exc:
@@ -35,12 +44,6 @@ def queue(db, candidate_id=None, *, original_id=None):
             result = {"id": candidate_id, "items": [], "state": "confirmation_pending",
                       "requires_status_check": True,
                       "message": "Nicotine+ has not confirmed this action. Check nicotine_transfer_status before any retry; do not treat this as a definite failure."}
-    if original_id is not None:
-        with closing(connect(db)) as connection, connection:
-            connection.execute("""
-                INSERT INTO download_comparisons(candidate, original_id) VALUES (?, ?)
-                ON CONFLICT(candidate) DO UPDATE SET original_id=excluded.original_id
-            """, (candidate_id, original_id))
     return public_status(result)
 
 
@@ -52,42 +55,94 @@ def public_status(result):
     }
 
 
-def staged_file_present(folder, entry):
+def staged_path(folder, entry):
     directory = folder / entry["directory"]
-    if directory.parent != folder or directory.is_symlink() or not directory.is_dir():
-        return False
-    suffix = PureWindowsPath(entry["remote"]).suffix.casefold()
+    if directory.parent != folder or not directory.name.isdecimal() or directory.resolve() != directory:
+        return None
+    if not directory.is_dir():
+        return None
+    remote = PureWindowsPath(entry["remote"])
+    matches = []
     for candidate in directory.iterdir():
-        info = candidate.lstat()
-        if (stat.S_ISREG(info.st_mode) and candidate.suffix.casefold() == suffix
+        try:
+            info = candidate.lstat()
+        except FileNotFoundError:
+            continue
+        if (stat.S_ISREG(info.st_mode) and candidate.suffix.casefold() == remote.suffix.casefold()
                 and info.st_size == entry["bytes"]):
-            return True
-    return False
+            matches.append(candidate)
+    if len(matches) == 1:
+        return str(matches[0].relative_to(folder))
+    return None
 
 
-def list_downloads():
+def local_transfer(candidate):
+    folder = staging_root() / candidate
+    manifest = read_job(folder)
+    if manifest["id"] != candidate or manifest["kind"] != selection_parts(candidate)[0]:
+        raise ValueError("The transfer receipt does not match its staging folder.")
+    items = []
+    for entry in manifest["entries"]:
+        path = staged_path(folder, entry)
+        items.append({"name": PureWindowsPath(entry["remote"]).name, "bytes": entry["bytes"],
+                      "status": "Finished" if path else "Waiting for Nicotine+",
+                      "file": path})
+    return {**manifest, "items": items, "complete": sum(bool(item["file"]) for item in items)}
+
+
+def transfer_status(candidate):
+    selection_parts(candidate)
+    try:
+        result = request("download_status", selection=candidate)
+    except (ValueError, OSError):
+        return local_transfer(candidate)
+    if not result["complete"] or result["complete"] < len(result["items"]):
+        try:
+            local = local_transfer(candidate)
+        except (OSError, ValueError):
+            return result
+        if local["complete"] > result["complete"]:
+            return local
+    return result
+
+
+def list_downloads(db=None):
     root = staging_root()
     if not root.is_dir() or root.resolve() != root:
         return []
-    folders = (folder for folder in root.iterdir() if SELECTION.fullmatch(folder.name) and not folder.is_symlink())
+    with closing(connect(db)) if db else nullcontext() as connection:
+        prepared = ({row["candidate"] for row in
+                     connection.execute("SELECT candidate FROM transfer_preparations")} if connection else set())
+        applied = ({row["candidate"] for row in
+                    connection.execute("SELECT candidate FROM kept_albums")} if connection else set())
+        associations = ({row["candidate"]: row["original_id"] for row in
+                         connection.execute("SELECT * FROM download_comparisons")} if connection else {})
     jobs = []
-    for folder in sorted(folders, key=lambda item: item.stat().st_mtime, reverse=True):
+    for folder in root.iterdir():
+        if not SELECTION.fullmatch(folder.name) or folder.is_symlink():
+            continue
         try:
-            manifest = read_job(folder)
+            manifest = local_transfer(folder.name)
             entries = manifest["entries"]
-            if not entries or not all(staged_file_present(folder, entry) for entry in entries):
+            if not entries:
                 continue
-        except (ValueError, OSError):
+        except (ValueError, OSError, KeyError, TypeError):
             continue
         entry = entries[0]
         remote = PureWindowsPath(entry["remote"])
-        title = (remote.parent.name if manifest["kind"] == "album" else remote.stem)
+        title = remote.parent.name if manifest["kind"] == "album" else remote.stem
+        complete = manifest["complete"]
+        if db is None and complete != len(entries):
+            continue
+        state = ("applied" if folder.name in applied else
+                 "reviewed" if folder.name in prepared and complete == len(entries) else
+                 "downloaded" if complete == len(entries) else "downloading")
         jobs.append({**{key: manifest[key] for key in ("id", "query", "kind", "created")},
                      "title": title or manifest["query"], "peer": entry["peer"],
-                     "total": len(entries)})
-        if len(jobs) >= 30:
-            break
-    return jobs
+                     "total": len(entries), "complete": complete, "state": state,
+                     "original_track_id": associations.get(folder.name)})
+    return sorted(jobs, key=lambda job: (job["created"], job["id"]), reverse=True)
+
 
 
 def title_key(title):
@@ -95,16 +150,36 @@ def title_key(title):
                    if character.isalnum())
 
 
+FEATURE = re.compile(r"\s+(?:[\[(]\s*)?(?:feat(?:uring)?|ft)\.?\s+", re.I)
+VERSION = re.compile(r"\b(?:live|remix|instrumental|clean|explicit|censored|uncensored|acoustic|demo|alternate|"
+                     r"radio edit|extended|remaster(?:ed)?|version|edit(?:ed)?|mono|stereo)\b", re.I)
+
+
+def recording_credit(value):
+    value = value or ""
+    split = FEATURE.search(value)
+    if not split:
+        return title_key(value), ""
+    base = value[:split.start()]
+    guest = value[split.end():].rstrip(")] ")
+    # Version modifiers anywhere in the suffix remain part of recording identity.
+    if VERSION.search(guest):
+        return title_key(value), ""
+    return title_key(base), title_key(guest)
+
+
 def recording_title(track):
-    title = track["title"] or ""
-    match = re.fullmatch(r"(.*?)\s+\(([^()]*)\)", title)
-    if match:
-        base, credit = match.groups()
-        lead = re.split(r"\b(?:feat|ft|featuring)\.?", credit, maxsplit=1, flags=re.I)[0]
-        key = title_key(lead)
-        if not key or title_key(track["artist"] or "").startswith(key):
-            return title_key(base)
-    return title_key(title)
+    return recording_credit(track["title"])[0]
+
+
+def same_credit(left, right):
+    return left[0] and left[0] == right[0] and (not left[1] or not right[1] or left[1] == right[1])
+
+
+def track_position(track, filename):
+    tag = str(track.get("track_number") or "").split("/")[0]
+    return int(tag) if tag.isdecimal() else filename_number(filename)
+
 
 
 def filename_number(name):
@@ -112,7 +187,7 @@ def filename_number(name):
     return int(match.group(1)) if match else None
 
 
-ORIGINAL_FIELDS = "id,path,artist,album,title,codec,quality,duration,protected"
+ORIGINAL_FIELDS = "id,path,artist,album,title,codec,quality,duration,protected,track_number,disc_number"
 
 
 def originals(db, track_id, kind):
@@ -129,13 +204,13 @@ def originals(db, track_id, kind):
         if row is None:
             raise ValueError("Choose an available, successfully indexed original track.")
         if kind == "track" or not row["album"]:
-            return [{key: row[key] for key in row.keys() if key != "root"}]
+            return [dict(row)]
         siblings = connection.execute(f"""
-            SELECT {fields} FROM tracks WHERE root=? AND album=? COLLATE NOCASE AND present=1 AND error IS NULL
+            SELECT root,{fields} FROM tracks WHERE root=? AND album=? COLLATE NOCASE AND present=1 AND error IS NULL
             ORDER BY path
         """, (row["root"], row["album"])).fetchall()
-    folder = Path(row["path"]).parent
-    return [dict(item) for item in siblings if Path(item["path"]).parent == folder]
+    folder = release_folder(row["path"])
+    return [dict(item) for item in siblings if release_folder(item["path"]) == folder]
 
 
 def inspect_file(binary, directory, relative, timeout):
@@ -150,6 +225,9 @@ def inspect_file(binary, directory, relative, timeout):
         return read_audio(binary, parent, candidate.name, signature(info), timeout), signature(info)
     finally:
         os.close(parent)
+
+
+MATCH_ASSESSMENTS = {"possible match", "check track order", "check featured credits"}
 
 
 def match_item(item, indexed, kind, filename):
@@ -170,16 +248,32 @@ def match_item(item, indexed, kind, filename):
         return ("ambiguous title" if candidates else "no matching title"), None
     original = candidates[0]
     if (not item["title"] or not original["title"]
-            or recording_title(item) != recording_title(original)
-            or not item["artist"] or not original["artist"]
-            or title_key(item["artist"]) != title_key(original["artist"])):
+            or recording_credit(item["title"])[0] != recording_credit(original["title"])[0]
+            or not recording_credit(item["artist"])[0]
+            or recording_credit(item["artist"])[0] != recording_credit(original["artist"])[0]):
         return "check title or artist", original
     if (not original["duration"] or not item["duration"]
             or abs(original["duration"] - item["duration"]) > 2):
         return "check duration", original
-    if (not original["album"] or not item["album"]
-            or title_key(item["album"]) != title_key(original["album"])):
+    if (kind == "album" and (not original["album"] or not item["album"])
+            or original["album"] and item["album"] and title_key(item["album"]) != title_key(original["album"])):
         return "check release tags", original
+    # Explicit version cues in a source filename still matter when audio tags omit them.
+    filename_variant = re.search(r"[\[(]([^]()]*)[\])]", Path(filename).stem)
+    if filename_variant and VERSION.search(filename_variant[1]) and title_key(filename_variant[1]) not in title_key(original["title"]):
+        return "check recording version", original
+    guests = [{guest for _, guest in (recording_credit(track[field]) for field in ("title", "artist")) if guest}
+              for track in (item, original)]
+    if all(guests) and guests[0] != guests[1]:
+        return "check featured credits", original
+    position = track_position(item, filename)
+    original_position = track_position(original, original["path"])
+    if kind == "album" and position and original_position and position != original_position:
+        return "check track order", original
+    disc = str(item.get("disc_number") or "").split("/")[0]
+    original_disc = str(original.get("disc_number") or "").split("/")[0]
+    if kind == "album" and disc.isdecimal() and original_disc.isdecimal() and int(disc) != int(original_disc):
+        return "check disc order", original
     return "possible match", original
 
 
@@ -195,8 +289,8 @@ def suggest_album(db, items):
         """, (next(iter(albums)),)).fetchall()
     groups = {}
     for row in rows:
-        key = (row["root"], Path(row["path"]).parent)
-        groups.setdefault(key, []).append({name: row[name] for name in row.keys() if name != "root"})
+        key = (row["root"], release_folder(row["path"]))
+        groups.setdefault(key, []).append(dict(row))
     ranked = []
     for group in groups.values():
         matches = set()
@@ -209,15 +303,78 @@ def suggest_album(db, items):
     return ranked[0] if len(ranked) == 1 else []
 
 
-def review_download(db, candidate_id=None, original_track_id=None, *, include_sources=False):
+def cached_edition(db, candidate, items):
+    audio = [item["audio"] for item in items if item.get("audio")]
+    if len(audio) < 2 or len(audio) != len(items):
+        return None
+    first = audio[0]
+    if not first.get("artist") or not first.get("album"):
+        return None
+    signature_key = json.dumps([(track.get("artist"), track.get("album"), track.get("title"),
+                                 track.get("duration"), track_position(track, item["name"]))
+                                for track, item in zip(audio, items)])
+    with closing(connect(db)) as connection:
+        cached = connection.execute(
+            "SELECT evidence FROM edition_evidence WHERE candidate=? AND metadata_key=?",
+            (candidate, signature_key)).fetchone()
+    if cached:
+        return json.loads(cached["evidence"])
+    evidence = {"status": "No corroborating edition found", "releases": []}
+    try:
+        release_candidates = search_releases(db, first["artist"], first["album"], limit=3)["items"]
+        if release_candidates:
+            ordered = sorted(zip(audio, items), key=lambda pair: (
+                str(pair[0].get("disc_number") or "1"), track_position(pair[0], pair[1]["name"]) or 0))
+            for offer in release_candidates:
+                edition = release_details(db, offer["id"])
+                if (title_key(edition.get("title") or "") != title_key(first["album"])
+                        or not any(same_credit(recording_credit(artist), recording_credit(first["artist"]))
+                                   for artist in edition["artists"])):
+                    continue
+                listing = [track for track in edition["tracklist"] if track["type_"] == "track"]
+                if len(listing) != len(ordered):
+                    continue
+                if all(edition_track_matches(track, item[0]) for track, item in zip(listing, ordered)):
+                    evidence["releases"].append({key: edition[key] for key in ("id", "url", "title", "year")})
+            if evidence["releases"]:
+                evidence["status"] = "Discogs tracklist corroborates title, order and available durations"
+    except (OSError, ValueError):
+        evidence["status"] = "Discogs lookup unavailable"
+        # A transient lookup failure must not prevent later enrichment.
+        return evidence
+    with closing(connect(db)) as connection, connection:
+        connection.execute("INSERT OR REPLACE INTO edition_evidence VALUES (?,?,?)",
+                           (candidate, signature_key, json.dumps(evidence)))
+    return evidence
+
+
+def edition_track_matches(edition, audio):
+    if not same_credit(recording_credit(edition["title"]), recording_credit(audio["title"])):
+        return False
+    duration = re.fullmatch(r"(\d+):(\d{2})", edition["duration"] or "")
+    return (not duration or not audio["duration"]
+            or abs(int(duration[1]) * 60 + int(duration[2]) - audio["duration"]) <= 3)
+
+
+def review_download(db, candidate_id=None, original_track_id=None, *, include_sources=False, research=False):
     selection_parts(candidate_id)
-    result = request("download_status", selection=candidate_id)
+    result = transfer_status(candidate_id)
     directory = staging_root() / candidate_id
     binary = find_probe() if result["complete"] else None
-    report = public_status(result)
+    report = public_status({key: value for key, value in result.items() if key != "entries"})
     with closing(connect(db)) as connection:
         kept = connection.execute("SELECT destination,mode FROM kept_albums WHERE candidate=?",
                                   (candidate_id,)).fetchone()
+        saved = connection.execute("SELECT report FROM transfer_reviews WHERE candidate=?", (candidate_id,)).fetchone()
+        outcome = connection.execute("SELECT result FROM upgrade_results WHERE candidate=?", (candidate_id,)).fetchone()
+        if kept and saved:
+            report = json.loads(saved["report"])
+            report["kept_both"] = dict(kept)
+            report["completion"] = json.loads(outcome["result"]) if outcome else None
+            for item in report["items"]:
+                item.pop("source", None)
+                item.pop("fingerprint", None)
+            return report
         if original_track_id is None and not kept:
             selected = connection.execute("""
                 SELECT tracks.id FROM download_comparisons
@@ -243,9 +400,12 @@ def review_download(db, candidate_id=None, original_track_id=None, *, include_so
             item["assessment"] = "audio inspection failed"
             continue
         item["audio"] = metadata
-        if include_sources:
-            item["source"] = str(directory / transfer["file"])
-            item["fingerprint"] = fingerprint
+        item["source"] = str(directory / transfer["file"])
+        item["fingerprint"] = fingerprint
+    if saved:
+        report["edition_evidence"] = json.loads(saved["report"]).get("edition_evidence")
+    if research and result["kind"] == "album" and len(report["items"]) == report["complete"]:
+        report["edition_evidence"] = cached_edition(db, candidate_id, report["items"])
     suggested = original_track_id is None and result["kind"] == "album"
     if suggested:
         indexed = suggest_album(db, report["items"])
@@ -257,7 +417,7 @@ def review_download(db, candidate_id=None, original_track_id=None, *, include_so
     if result["kind"] == "album" and selected_album and tagged_albums and title_key(selected_album) not in tagged_albums:
         report["comparison"]["album_mismatch"] = True
         report["originals_without_match"] = []
-        return report
+        return save_review(db, report, include_sources)
     for item in report["items"]:
         if "audio" not in item:
             continue
@@ -265,9 +425,36 @@ def review_download(db, candidate_id=None, original_track_id=None, *, include_so
         item["assessment"], original = match_item(metadata, indexed, result["kind"], item["name"])
         if original:
             item["original"] = original
-            if item["assessment"] == "possible match":
-                if original["id"] in possible:
-                    item["assessment"] = "another candidate also matches this original"
+            if item["assessment"] in MATCH_ASSESSMENTS:
                 possible.add(original["id"])
+    for original_id in possible:
+        matches = [item for item in report["items"] if item.get("assessment") in MATCH_ASSESSMENTS
+                   and item["original"]["id"] == original_id]
+        if len(matches) > 1:
+            for item in matches:
+                item["assessment"] = "ambiguous duplicate recording"
+    possible = {item["original"]["id"] for item in report["items"]
+                if item.get("assessment") == "possible match"}
     report["originals_without_match"] = [item for item in indexed if item["id"] not in possible]
+    return save_review(db, report, include_sources)
+
+
+def save_review(db, report, include_sources):
+    if report["items"] and report["complete"] == len(report["items"]):
+        with closing(connect(db)) as connection, connection:
+            connection.execute("""
+                INSERT INTO transfer_reviews(candidate,report) VALUES (?,?)
+                ON CONFLICT(candidate) DO UPDATE SET report=excluded.report
+            """, (report["id"], json.dumps(report)))
+            comparison = report["comparison"]
+            if comparison and not comparison.get("album_mismatch") and any(
+                    item.get("assessment") in MATCH_ASSESSMENTS for item in report["items"]):
+                connection.execute("""
+                    INSERT INTO download_comparisons(candidate,original_id) VALUES (?,?)
+                    ON CONFLICT(candidate) DO NOTHING
+                """, (report["id"], comparison["original_track_id"]))
+    if not include_sources:
+        for item in report["items"]:
+            item.pop("source", None)
+            item.pop("fingerprint", None)
     return report

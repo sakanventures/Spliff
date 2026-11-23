@@ -153,15 +153,15 @@ final class CompanionModel: ObservableObject {
         panel.prompt = "Choose music"
         guard panel.runModal() == .OK, let url = panel.url else { return }
         Task {
-            busy = true; message = "Reading music…"
+            busy = true; message = "Syncing music…"
             // Follow the active service catalog if it differs from this checkout's default.
             var db = database.path
             let settings = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/Spliff/Services/settings.json")
             if let data = try? Data(contentsOf: settings), let saved = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                let value = saved["db"] as? String { db = value }
-            let result = await Self.run(project: project, arguments: ["--db", db, "scan", url.path])
+            let result = await Self.run(project: project, arguments: ["--db", db, "sync", url.path])
             busy = false
-            message = result.code == 0 ? "Music indexed." : result.error
+            message = result.code == 0 ? "Folder sync started." : result.error
             if result.code == 0 { revision = UUID() }
         }
     }

@@ -142,16 +142,18 @@ async function loadReviews() {
 function view(page) {
   document.body.dataset.view = page;
   get('advanced').open = false;
-  for (const [id, key, panel] of [['albums', 'albums', 'albums-panel'], ['browse', 'tracks', 'index'],
+  for (const [id, key, panel] of [['sync', 'sync', 'sync-panel'], ['albums', 'albums', 'albums-panel'], ['browse', 'tracks', 'index'],
     ['staged', 'reviews', 'review-panel'], ['downloads', 'downloads', 'downloads-panel']]) {
     get(id).setAttribute('aria-pressed', page === key);
     get(panel).hidden = page !== key;
   }
+  if (page === 'sync') loadSync();
+  else clearTimeout(syncTimer);
   if (page === 'albums' && !get('album-library').hidden) loadAlbums();
   if (page === 'tracks') { refreshSummary(); loadTracks(); }
   if (page === 'reviews') loadReviews();
   if (page === 'downloads') {
-    if (companion) showDownloadList();
+    showDownloadList();
     loadDownloads();
   }
   else { downloadRequest++; downloadListRequest++; clearTimeout(downloadTimer); }
@@ -187,7 +189,7 @@ async function loadAlbums() {
   try {
     const {items, more, has_library: hasLibrary} = await api('/api/albums?' + new URLSearchParams({q: query}));
     if (request !== albumRequest) return;
-    get('scan').hidden = !hasLibrary;
+
     get('album-filter').hidden = !hasLibrary;
     get('library-empty').hidden = hasLibrary;
     status.textContent = !hasLibrary ? '' : !items.length ?
@@ -326,7 +328,7 @@ get('download-back').addEventListener('click', () => {
 });
 
 function selectDownload(job, open = false) {
-  if (companion && open) {
+  if (open) {
     get('action-status').hidden = true;
     get('downloads-panel').classList.add('show-download');
     get('download-back').hidden = false;
@@ -363,28 +365,29 @@ async function loadDownloads(selected, quiet = false) {
   try {
     const {items} = await api('/api/downloads');
     if (request !== downloadListRequest) return;
-    if (quiet && items.map(item => item.id).join() === downloadJobs.map(item => item.id).join()) return;
+    if (quiet && !selected && JSON.stringify(items) === JSON.stringify(downloadJobs)) return;
     downloadJobs = items;
     const list = get('download-list');
     list.replaceChildren(...items.map(job => {
       const button = element('button', '', 'download-job');
       button.dataset.job = job.id;
       const title = element('span');
-      title.append(element('strong', job.title), element('small', job.total + ' tracks'));
+      const label = {applied: 'Applied', reviewed: 'Reviewed', downloaded: 'Reviewing audio', downloading: 'Downloading'}[job.state];
+      title.append(element('strong', job.title), element('small', [label, job.total + ' tracks'].filter(Boolean).join(' · ')));
       button.append(title);
-      if (companion) button.append(element('span', 'Review →', 'download-open'));
+      button.append(element('span', 'Open →', 'download-open'));
       button.addEventListener('click', () => {
         downloadOriginal = null;
         selectDownload(job, true);
       });
       return button;
     }));
-    if (companion && !items.length) {
-      list.append(element('p', 'Completed Nicotine+ downloads will appear here.', 'download-empty'));
+    if (!items.length) {
+      list.append(element('p', 'Downloads will appear here after Spliff finds a suitable offer.', 'download-empty'));
     }
     const job = items.find(item => item.id === (selected || selectedDownload?.id)) || items[0];
-    if (job && (!companion || selected || downloadOriginal || get('downloads-panel').classList.contains('show-download'))) {
-      selectDownload(job, companion && Boolean(selected || downloadOriginal));
+    if (job && (selected || downloadOriginal || get('downloads-panel').classList.contains('show-download'))) {
+      selectDownload(job, Boolean(selected || downloadOriginal));
     } else if (job) {
       selectedDownload = null;
     }
@@ -398,11 +401,11 @@ async function loadDownloads(selected, quiet = false) {
       get('download-note').hidden = true;
       get('download-details').hidden = true;
       get('download-status').textContent = 'No completed downloads yet.';
-      if (companion) showDownloadList();
+      showDownloadList();
     }
   } catch (error) {
     if (request === downloadListRequest && !quiet) {
-      if (companion && !get('downloads-panel').classList.contains('show-download')) {
+      if (!get('downloads-panel').classList.contains('show-download')) {
         get('download-list').replaceChildren(element('p', error.message, 'download-empty'));
       } else get('download-status').textContent = error.message;
     }
@@ -431,28 +434,41 @@ function showDownload(result, job) {
   const count = result.complete + ' of ' + review.length + ' tracks downloaded';
   const progress = get('download-progress');
   progress.value = result.complete;
-  progress.hidden = companion && result.complete === review.length;
+  progress.hidden = result.complete === review.length;
   get('download-status').textContent = count + (result.comparison && !result.comparison.album_mismatch ? ' · ' + matched + ' possible matches' : '');
   const candidateAlbum = review.find(item => item.audio?.album)?.audio.album;
   get('download-title').textContent = candidateAlbum || job.title;
-  get('download-comparison').hidden = !result.complete && !downloadOriginal;
+  get('download-comparison').hidden = result.complete !== review.length;
   const kept = result.kept_both;
   get('download-original').textContent = kept ? (kept.mode === 'replace' ? 'FLACs in use' : 'Both versions saved') :
     result.comparison?.album || downloadOriginal?.title || 'No album selected';
   get('choose-original').textContent = companion && result.comparison?.album ?
     'Change album' : 'Choose comparison album';
-  get('choose-original').hidden = Boolean(kept);
-  const eligible = !kept && result.kind === 'album' && result.complete === review.length &&
-    matched === review.length && !result.originals_without_match.length &&
-    review.every(item => item.audio?.codec === 'flac' && item.original?.codec === 'mp3' &&
-      !item.original.protected);
+  get('choose-original').hidden = Boolean(kept) || !result.complete;
+  const eligible = !kept && result.comparison && !result.comparison.album_mismatch &&
+    result.complete === review.length &&
+    review.some(item => ['possible match', 'check track order', 'check featured credits'].includes(item.assessment) &&
+      item.audio?.quality === 'lossless' &&
+      item.original?.quality === 'lossy' && !item.original.protected);
   get('keep-both').hidden = !eligible;
-  if (companion) get('keep-both').textContent = 'Review upgrade';
+  get('keep-both').textContent = 'Choose upgrade';
   keptComparison = eligible ? {candidate: job.id, original: result.comparison.original_track_id} : null;
+  const edition = result.edition_evidence;
+  const editionNote = get('download-edition');
+  editionNote.hidden = !edition;
+  editionNote.replaceChildren();
+  if (edition) {
+    editionNote.append(edition.status);
+    for (const release of edition.releases) {
+      const anchor = element('a', `${release.title} (${release.year || 'year unknown'})`);
+      anchor.href = release.url;
+      editionNote.append(' · ', anchor);
+    }
+  }
   const note = get('download-note');
   let message = '';
-  if (kept) message = kept.mode === 'replace' ? 'FLACs are in use.' :
-    'Both versions were saved. The original MP3s are in the MP3 folder.';
+  if (result.completion) message = completionText(result.completion);
+  else if (kept) message = kept.mode === 'replace' ? 'Lossless upgrades are in use.' : 'Both versions were saved.';
   else if (result.comparison?.album_mismatch) message = 'Choose the matching album in your library.';
   else if (review.some(item => item.original?.protected)) message = 'This album includes protected tracks.';
   else if (result.comparison && !eligible && result.kind === 'album') {
@@ -507,18 +523,6 @@ async function refreshDownload() {
   try {
     const result = await api('/api/download-review?' + query);
     if (request !== downloadRequest) return;
-    if (result.complete !== result.items.length) {
-      get('download-list').querySelector('[aria-pressed="true"]')?.remove();
-      selectedDownload = null;
-      get('download-heading').hidden = true;
-      get('download-comparison').hidden = true;
-      get('download-report').replaceChildren();
-      get('download-note').hidden = true;
-      get('download-details').hidden = true;
-      get('download-status').textContent = '';
-      if (companion) { showDownloadList(); await loadDownloads(); }
-      return;
-    }
     showDownload(result, job);
   } catch (error) {
     if (request === downloadRequest) get('download-status').textContent = error.message;
@@ -545,98 +549,87 @@ get('queue-form').addEventListener('submit', async event => {
 
 const keepDialog = get('keep-both-dialog');
 const keepStatus = get('keep-both-status');
-const keepConfirm = get('confirm-keep-both');
-let keepParameters = null;
-let keepPreviewRequest = 0;
-let applyingKeepBoth = false;
+let applyingUpgrade = false;
+let refreshUpgradePlans = false;
+let upgradeOptionsRequest = 0;
 
-function showAlbumChoices() {
-  keepPreviewRequest++;
-  keepParameters = null;
-  get('keep-both-heading').textContent = 'Use the FLAC album';
-  get('album-actions-description').hidden = false;
-  get('album-action-choices').hidden = false;
-  get('album-action-preview').hidden = true;
-  get('album-action-confirmation').hidden = true;
+function completionText(result) {
+  const counts = `${result.upgraded} upgraded · ${result.preserved} originals preserved · ${result.skipped.length} skipped · ${result.failed} failed`;
+  return result.trash_pending ? `${counts}. Originals awaiting Trash are recoverable at ${result.trash_pending}.` : counts;
 }
 
-get('keep-both').addEventListener('click', () => {
-  if (!keptComparison) return;
-  showAlbumChoices();
+get('keep-both').addEventListener('click', async () => {
+  if (!keptComparison || keepDialog.open) return;
+  const comparison = keptComparison;
+  const request = ++upgradeOptionsRequest;
+  const options = get('upgrade-options');
+  options.replaceChildren();
+  keepStatus.textContent = 'Checking audio and destinations…';
   keepDialog.showModal();
+  const query = new URLSearchParams({...comparison, refresh: refreshUpgradePlans ? '1' : '0'});
+  try {
+    const result = await api('/api/upgrade-options?' + query);
+    if (!keepDialog.open || request !== upgradeOptionsRequest) return;
+    refreshUpgradePlans = false;
+    keepStatus.textContent = '';
+    for (const [mode, label] of [['keep', 'Keep both'], ['replace', 'Replace']]) {
+      const plan = result.options[mode];
+      const card = element('section', '', 'upgrade-option');
+      card.append(element('h3', label));
+      if (!plan) {
+        card.append(element('p', result.blocked[mode], 'muted'));
+        options.append(card);
+        continue;
+      }
+      card.append(element('p', `${plan.count} upgrades → ${plan.destination}`),
+        element('p', `Originals → ${plan.archive}`));
+      if (plan.preserved.length || plan.skipped.length) {
+        card.append(element('p', `${plan.preserved.length} originals stay in place · ${plan.skipped.length} downloads skipped`, 'muted'));
+      }
+      const details = element('details');
+      details.append(element('summary', 'Advanced · exact files and audio review'));
+      const files = element('ul');
+      for (const file of plan.files) {
+        const evidence = file.audio_evidence;
+        files.append(element('li', `${file.install} · Original: ${file.original} → ${file.archive}` +
+          (evidence ? ` · ${evidence.status}` : '')));
+      }
+      for (const skipped of plan.skipped) files.append(element('li', `Skipped ${skipped.download}: ${skipped.reason}`));
+      details.append(files, element('p', plan.audio_review, 'muted'));
+      const button = element('button', label, mode === 'replace' ? 'primary' : '');
+      button.addEventListener('click', () => applyUpgrade(comparison, mode, plan));
+      card.append(details, button);
+      options.append(card);
+    }
+  } catch (error) {
+    if (request === upgradeOptionsRequest) keepStatus.textContent = error.message;
+  }
 });
 
-async function previewAlbumAction(mode) {
-  if (!keptComparison) return;
-  const request = ++keepPreviewRequest;
-  const query = new URLSearchParams({...keptComparison, mode});
-  keepParameters = null;
-  keepConfirm.disabled = true;
-  const replace = mode === 'replace';
-  get('keep-both-heading').textContent = replace ? 'Replace with FLACs' : 'Keep both versions';
-  keepConfirm.textContent = replace ? 'Confirm replace' : 'Confirm keep both';
-  get('album-actions-description').hidden = true;
-  get('album-action-choices').hidden = true;
-  get('album-action-preview').hidden = false;
-  get('album-action-confirmation').hidden = false;
-  get('keep-both-summary').textContent = '';
-  get('flac-destination').textContent = '';
-  get('mp3-destination').textContent = '';
-  keepStatus.textContent = 'Checking files and destinations…';
+get('cancel-keep-both').addEventListener('click', () => keepDialog.close());
+keepDialog.addEventListener('close', () => { upgradeOptionsRequest++; });
+keepDialog.addEventListener('cancel', event => { if (applyingUpgrade) event.preventDefault(); });
+
+async function applyUpgrade(comparison, mode, plan) {
+  if (applyingUpgrade) return;
+  applyingUpgrade = true;
+  get('cancel-keep-both').disabled = true;
+  get('upgrade-options').querySelectorAll('button').forEach(button => { button.disabled = true; });
+  keepStatus.textContent = 'Verifying and installing upgrades…';
   try {
-    const plan = await api('/api/keep-both?' + query);
-    if (!keepDialog.open || request !== keepPreviewRequest) return;
-    get('keep-both-summary').textContent = 'Copy ' + plan.count + ' FLACs into ' + plan.album +
-      (replace ? (plan.archive === 'Mac Trash' ? ' and move the original MP3s to the Mac Trash.' :
-        ' and move the original MP3s into the hidden recovery folder.') : ' and move the original MP3s into MP3.');
-    get('flac-destination').textContent = plan.destination;
-    get('mp3-destination').textContent = plan.archive;
-    keepStatus.textContent = '';
-    query.set('token', plan.token);
-    keepParameters = query;
-    keepConfirm.disabled = false;
+    const params = new URLSearchParams({...comparison, mode, token: plan.token});
+    const result = await action('/api/keep-both?' + params);
+    keepDialog.close();
+    await loadDownloads(comparison.candidate);
+    notice(completionText(result));
   } catch (error) {
-    if (request === keepPreviewRequest) keepStatus.textContent = error.message;
+    refreshUpgradePlans = true;
+    keepStatus.textContent = error.message + ' Reopen the options to review the current plan.';
+  } finally {
+    applyingUpgrade = false;
+    get('cancel-keep-both').disabled = false;
   }
 }
-
-get('choose-keep-both').addEventListener('click', () => previewAlbumAction('keep'));
-get('choose-replace').addEventListener('click', () => previewAlbumAction('replace'));
-get('back-to-album-actions').addEventListener('click', showAlbumChoices);
-get('cancel-keep-both').addEventListener('click', () => keepDialog.close());
-keepDialog.addEventListener('cancel', event => { if (applyingKeepBoth) event.preventDefault(); });
-keepConfirm.addEventListener('click', async () => {
-  if (!keepParameters || applyingKeepBoth) return;
-  applyingKeepBoth = true;
-  keepConfirm.disabled = true;
-  get('cancel-keep-both').disabled = true;
-  get('back-to-album-actions').disabled = true;
-  const replace = keepParameters.get('mode') === 'replace';
-  keepStatus.textContent = replace ? 'Swapping in FLACs…' : 'Saving both versions…';
-  try {
-    const result = await action('/api/keep-both?' + keepParameters);
-    keepDialog.close();
-    const installed = replace ? (result.trash_pending ?
-      'FLACs are now in use. The Mac Trash move failed. MP3s are still at ' + result.trash_pending :
-      (result.archive === 'Mac Trash' ? 'FLACs are now in use. Original MP3s are in the Mac Trash.' :
-        'FLACs are now in use. Original MP3s are in the hidden recovery folder.')) :
-      'Both versions saved. Original MP3s are in the album’s MP3 folder.';
-    const cleanup = result.staging_removed === result.count ? 'Download copy removed.' :
-      'Some download files remain in staging.';
-    notice([installed, cleanup, result.work_cleanup_pending && !result.trash_pending && 'A temporary work folder remains.']
-      .filter(Boolean).join(' '));
-    refreshSummary();
-    loadTracks();
-    downloadOriginal = null;
-    loadDownloads();
-  } catch (error) {
-    keepStatus.textContent = error.message;
-  } finally {
-    applyingKeepBoth = false;
-    get('cancel-keep-both').disabled = false;
-    get('back-to-album-actions').disabled = false;
-  }
-});
 
 get('reload-download').addEventListener('click', refreshDownload);
 get('choose-original').addEventListener('click', () => {
@@ -785,28 +778,54 @@ async function scanMusic() {
     window.webkit.messageHandlers.spliffMac.postMessage('chooseMusic');
     return;
   }
-  get('scan').disabled = true;
   get('add-library').disabled = true;
+  get('sync-folder').disabled = true;
   notice('Choose a music folder in Finder.');
   try {
     const result = await action('/api/scan');
     if (result.cancelled) {
       notice('Folder selection canceled.');
     } else {
-      notice(result.errors ? 'Scan complete. Some files could not be read. See Advanced → Track index.' :
-        'Scan complete. Your library is saved.');
+      notice(`Folder indexed. ${result.targets} upgrade searches scheduled.`);
+      view('sync');
       if (document.body.dataset.view === 'tracks') { refreshSummary(); loadTracks(); }
       if (document.body.dataset.view === 'albums') showAlbumLibrary();
     }
   } catch (error) {
     notice(error.message);
   } finally {
-    get('scan').disabled = false;
     get('add-library').disabled = false;
+    get('sync-folder').disabled = false;
   }
 }
 
-get('scan').addEventListener('click', scanMusic);
+let syncTimer;
+let syncRequest = 0;
+async function loadSync() {
+  const request = ++syncRequest;
+  clearTimeout(syncTimer);
+  try {
+    const {items, folders} = await api('/api/sync');
+    if (request !== syncRequest) return;
+    const counts = {};
+    for (const item of items) counts[item.current_state] = (counts[item.current_state] || 0) + 1;
+    const labels = {queued: 'Searching', downloading: 'Downloading', queueing: 'Starting', reviewing: 'Reviewing audio', reviewed: 'Reviewed',
+      applied: 'Applied', no_candidate: 'No offer', search_failed: 'Search failed', queue_uncertain: 'Transfer needs attention'};
+    get('sync-status').textContent = Object.entries(counts).map(([key, count]) => `${labels[key]} · ${count}`).join('   ')
+      || (folders.length ? 'No eligible upgrades in the selected folders.' : '');
+    get('sync-details').hidden = !folders.length;
+    get('sync-downloads').hidden = !folders.length;
+    get('sync-items').replaceChildren(...folders.map(folder => element('li', folder)),
+      ...items.map(item => element('li', [item.query, labels[item.current_state], item.detail].filter(Boolean).join(' · '))));
+  } catch (error) {
+    get('sync-status').textContent = error.message;
+  } finally {
+    if (request === syncRequest && document.body.dataset.view === 'sync') syncTimer = setTimeout(loadSync, 5000);
+  }
+}
+get('sync').addEventListener('click', () => view('sync'));
+get('sync-downloads').addEventListener('click', () => view('downloads'));
+get('sync-folder').addEventListener('click', scanMusic);
 get('add-library').addEventListener('click', scanMusic);
 const companion = Boolean(window.webkit?.messageHandlers?.spliffMac);
 if (companion) {
@@ -814,14 +833,10 @@ if (companion) {
   get('browse').textContent = 'Find individual tracks';
   get('staged').textContent = 'Saved file comparisons';
   get('albums-heading').textContent = 'Upgrade an album';
-  get('add-music-mac').hidden = false;
-  get('add-music-mac').addEventListener('click', () => {
-    get('advanced').open = false;
-    scanMusic();
-  });
   get('open-settings').hidden = true;
 }
-view('albums');
+get('download-comparison-control').append(get('choose-original'));
+view('sync');
 
 // One graph, one track selector, one source switch. Analysis stays on this Mac.
 function spectrumViewer(container, choices, parameters) {

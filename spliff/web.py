@@ -3,16 +3,16 @@ import json
 import shutil
 import subprocess
 from tempfile import TemporaryDirectory
+from threading import Event, Thread
 import sqlite3
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from .catalog import albums, replacement_preference, stats, tracks
-from . import keep_both
+from . import keep_both, sync
 from .nicotine import search
 from .review import protect, reviews, stage
-from .scanner import scan
 from .spectral import analyze_track, analyze_download
 from .artist import library as artist_library, upgrades as artist_upgrades
 from .staged_downloads import list_downloads, queue, review_download
@@ -47,13 +47,18 @@ def serve(db, port):
                 elif url.path == "/api/artist-library":
                     self.reply_json(artist_library(db, params.get("artist"), int(params.get("after", 0))))
                 elif url.path == "/api/downloads":
-                    self.reply_json({"items": list_downloads()})
+                    self.reply_json({"items": list_downloads(db)})
+                elif url.path == "/api/sync":
+                    self.reply_json(sync.status(db))
                 elif url.path == "/api/download-review":
                     original = int(params["original"]) if params.get("original") else None
                     try:
                         self.reply_json(review_download(db, params.get("candidate"), original))
                     except ValueError as exc:
                         self.reply_json({"error": str(exc)}, 400)
+                elif url.path == "/api/upgrade-options":
+                    self.reply_json(keep_both.review_plans(db, params.get("candidate"), int(params.get("original", 0)),
+                                                         refresh=params.get("refresh") == "1"))
                 elif url.path == "/api/keep-both":
                     try:
                         self.reply_json(keep_both.preview(db, params.get("candidate"), int(params.get("original", 0)),
@@ -192,7 +197,7 @@ def serve(db, port):
                     self.reply_json({"cancelled": True})
                     return
                 raise ValueError("Spliff could not open the macOS folder picker.")
-            self.reply_json(scan(db, Path(result.stdout.removesuffix("\n"))))
+            self.reply_json(sync.start(db, result.stdout.removesuffix("\n")))
 
         def log_message(self, *_args):
             pass
@@ -213,4 +218,10 @@ def serve(db, port):
 
     with ThreadingHTTPServer(("127.0.0.1", port), Handler) as server:
         print(f"http://127.0.0.1:{server.server_port}", flush=True)
-        server.serve_forever()
+        stop = Event()
+        worker = Thread(target=sync.run_worker, args=(db, stop), daemon=True, name="spliff-sync")
+        worker.start()
+        try:
+            server.serve_forever()
+        finally:
+            stop.set()

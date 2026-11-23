@@ -5,7 +5,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from . import mcp, web
+from . import mcp, sync, web
 from .catalog import initialize
 from .discogs_auth import setup_discogs
 from .review import protect, stage
@@ -23,6 +23,7 @@ def main():
     services_parser.add_argument("arguments", nargs=argparse.REMAINDER)
     scan_parser = commands.add_parser("scan", help="Index a music folder read-only")
     scan_parser.add_argument("root", type=Path)
+    commands.add_parser("sync", help="Scan a folder and schedule lossless upgrades").add_argument("folder")
     spectrum = commands.add_parser("spectrum", help="Analyze an indexed track locally")
     spectrum.add_argument("id", type=int)
     for command in ("artist-library", "artist-upgrades"):
@@ -37,7 +38,7 @@ def main():
     mcp_parser.add_argument("--search-only", action="store_true",
                             help="Expose only Nicotine+ search to a connected chat")
     mcp_parser.add_argument("--allow-downloads", action="store_true",
-                            help="Also expose explicitly selected downloads and review")
+                            help="Expose folder sync, downloads and upgrade review")
     mcp_parser.add_argument("--allow-discogs", action="store_true",
                             help="Expose read-only Discogs release lookups")
     installer = commands.add_parser("install-nicotine-plugin", help="Install Spliff Search for Nicotine+")
@@ -61,6 +62,9 @@ def main():
             return 0
         if args.command == "discogs-setup":
             setup_discogs()
+            return 0
+        if args.command == "sync":
+            print(json.dumps(sync.start(db, args.folder)))
             return 0
         if args.command == "scan":
             root = args.root.expanduser()

@@ -16,11 +16,11 @@ from urllib.request import Request, urlopen
 from urllib.parse import quote
 
 from spliff.catalog import connect, replacement_preference, signature, stats, tracks
-from spliff import keep_both
+from spliff import keep_both, mcp, sync
 from spliff.review import protect, reviews, stage
 from spliff.scanner import scan
 from spliff.nicotine_bridge.downloads import Downloads
-from spliff.staged_downloads import list_downloads, queue, review_download, suggest_album
+from spliff.staged_downloads import cached_edition, list_downloads, match_item, queue, review_download, suggest_album
 
 @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "Requires FFmpeg")
 class VerticalSlice(unittest.TestCase):
@@ -207,6 +207,98 @@ class VerticalSlice(unittest.TestCase):
                   "items": [{"assessment": "possible match", "original": indexed, "audio": audio,
                              "source": str(staged), "fingerprint": signature(staged.stat())}]}
         return indexed, report
+
+    def test_discogs_tracklist_corroboration_is_saved_per_transfer(self):
+        scan(self.db, self.root)
+        listing = [{"title": "First", "position": "1", "duration": "3:02", "type_": "track"},
+                   {"title": "Second", "position": "2", "duration": "4:01", "type_": "track"}]
+        release = {"id": 42, "url": "https://www.discogs.com/release/42", "title": "Album",
+                   "year": 2007, "artists": ["Common"], "tracklist": listing}
+        items = [{"name": "02.flac", "audio": {"title": "Second", "duration": 241,
+                      "artist": "Common", "album": "Album", "track_number": "2"}},
+                 {"name": "01.flac", "audio": {"title": "First", "duration": 182,
+                      "artist": "Common", "album": "Album", "track_number": "1"}}]
+        with patch("spliff.staged_downloads.search_releases", return_value={"items": [{"id": 42}]}) as lookup, \
+                patch("spliff.staged_downloads.release_details", return_value=release):
+            evidence = cached_edition(self.db, self.album_selection, items)
+            self.assertEqual(evidence["releases"][0]["year"], 2007)
+            self.assertEqual(cached_edition(self.db, self.album_selection, items), evidence)
+            lookup.assert_called_once()
+
+    def test_recording_review_separates_credit_and_recording_differences(self):
+        original = {"title": "Drivin' Me Wild (ft. Lily Allen)", "artist": "Common",
+                    "album": "Finding Forever", "duration": 222.54, "path": "06 Drivin.mp3"}
+        download = {"title": "Drivin’ Me Wild", "artist": "Common feat. Lily Allen",
+                    "album": "Finding Forever", "duration": 222.53, "quality": "lossless"}
+        self.assertEqual(match_item(download, [original], "album", "04 Drivin.flac")[0], "check track order")
+        self.assertEqual(match_item(download, [original], "album", "06 Drivin.flac")[0], "possible match")
+        for suffix in ("Live", "Remix", "Instrumental", "Clean", "Explicit", "Alternate Version"):
+            variant = dict(download, title=f"Drivin’ Me Wild (ft. Lily Allen) ({suffix})")
+            self.assertNotEqual(match_item(variant, [original], "album", "06 Drivin.flac")[0], "possible match")
+
+    @unittest.skipUnless(sys.platform == "darwin", "Requires exclusive macOS rename")
+    def test_sync_persists_transfer_and_applies_selected_partial_plan(self):
+        for path, title in ((self.original, "Rare Cut"), (self.root / "Other.mp3", "Unmatched Cut"),
+                            (self.root / "Protected.mp3", "Protected Cut"),
+                            (self.candidate, "Rare Cut")):
+            subprocess.run(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", "sine=duration=1",
+                            "-metadata", f"title={title}", "-metadata", "album=Example Album",
+                            "-metadata", "artist=Example Artist", str(path)], check=True, timeout=15)
+        scan(self.db, self.root)
+        protected = next(row for row in tracks(self.db)["items"] if row["title"] == "Protected Cut")
+        protect(self.db, protected["id"], True)
+        selection = self.album_selection
+        staging = self.base.resolve() / "staging"
+        folder = staging / selection
+        entry = folder / "001"
+        entry.mkdir(parents=True)
+        staged = entry / "Rare Cut.flac"
+        offer = {"candidate_id": selection, "matching_files": 2, "lossless_files": 2,
+                 "filenames": ["Rare Cut.flac", "Protected Cut.flac"], "free_slot": True, "queue": 0}
+
+        def bridge(operation, **_args):
+            if operation != "queue":
+                raise ValueError("Nicotine+ offline")
+            (folder / "job.json").write_text(json.dumps({
+                "id": selection, "kind": "album", "query": "Example Artist Example Album", "created": 1,
+                "entries": [{"directory": "001", "peer": "test", "remote": r"Example Album\Rare Cut.flac",
+                             "bytes": self.candidate.stat().st_size}]}))
+            return {"id": selection, "items": [], "complete": 0}
+
+        with patch("spliff.staged_downloads.staging_root", return_value=staging), \
+                patch("spliff.keep_both.staging_root", return_value=staging), \
+                patch("spliff.staged_downloads.request", side_effect=bridge), \
+                patch("spliff.sync.search", return_value={"candidates": [offer]}), \
+                patch("spliff.staged_downloads.search_releases", return_value={"items": []}):
+            self.assertEqual(sync.start(self.db, str(self.root))["targets"], 1)
+            sync.reconcile(self.db)
+            self.assertEqual(list_downloads(self.db)[0]["state"], "downloading")
+            self.assertEqual(reviews(self.db), [])
+            shutil.copyfile(self.candidate, staged)
+            sync.reconcile(self.db)
+            self.assertEqual(list_downloads(self.db)[0]["state"], "reviewed")
+            decision = mcp.review_for_chat(self.db, selection)["album_decision"]
+            old = decision["options"]["replace"]
+            self.assertEqual(old["count"], 1)
+            self.assertCountEqual(old["preserved"], ["Other.mp3", "Protected.mp3"])
+            self.assertTrue(self.original.exists())
+            replacement_preference(self.db, "hidden")
+            with self.assertRaisesRegex(ValueError, "comparison changed"):
+                mcp.confirm_album_action(self.db, selection, decision["original_track_id"],
+                                         "replace", old["token"], confirmed=True)
+            self.assertTrue(self.original.exists())
+            plan = keep_both.preview(self.db, selection, decision["original_track_id"], "replace")
+            result = mcp.confirm_album_action(self.db, selection, decision["original_track_id"],
+                                              "replace", plan["token"], confirmed=True)
+            self.assertEqual(result["upgraded"], 1)
+            self.assertEqual(result["preserved"], 2)
+            self.assertTrue((self.root / "Protected.mp3").exists())
+            self.assertTrue((self.root / "Other.mp3").exists())
+            self.assertEqual(self.original.with_suffix(".flac").read_bytes(), self.candidate.read_bytes())
+            self.assertEqual(list_downloads(self.db)[0]["state"], "applied")
+            self.assertEqual(mcp.review_for_chat(self.db, selection)["completion"], result)
+            self.assertEqual(mcp.transfer_status(self.db, selection)["completion"], result)
+            self.assertFalse(staged.exists())
 
     @unittest.skipUnless(sys.platform == "darwin", "Requires exclusive macOS rename")
     def test_spectral_failure_blocks_destination_preview_without_moving_files(self):

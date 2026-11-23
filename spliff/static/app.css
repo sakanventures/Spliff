@@ -187,3 +187,24 @@ dialog::backdrop { background: #060906bd; }
 .companion #index, .companion #review-panel { margin-top: 22px; }
 .companion .track-actions details button { margin: 6px 0 0; }
 .companion #action-status { margin-top: 14px; }
+
+#sync-panel { max-width: 760px; margin: auto; }
+#sync-panel .hero p { margin: 12px 0 20px; }
+#sync-details { margin-block: 18px; }
+#sync-items li { padding-block: 5px; }
+#downloads-panel .download-layout { display: block; min-height: 0; }
+#downloads-panel .download-sidebar { border: 0; }
+#downloads-panel:not(.show-download) .download-detail,
+#downloads-panel.show-download .download-sidebar { display: none; }
+#download-back { margin-bottom: 16px; }
+.download-job { display: flex; justify-content: space-between; align-items: center; gap: 16px; }
+.download-open { white-space: nowrap; }
+.download-empty { padding-inline: 18px; }
+#download-comparison-control { margin-block: 10px; }
+#download-edition a { color: var(--accent); }
+#upgrade-options { display: grid; gap: 10px; margin-bottom: 14px; }
+.upgrade-option { border: 1px solid var(--edge); padding: 12px; border-radius: 8px; overflow-wrap: anywhere; }
+.upgrade-option h3, .upgrade-option p { margin: 0 0 8px; }
+.upgrade-option details { margin-bottom: 10px; }
+.upgrade-option li { margin-bottom: 5px; }
+#keep-both-dialog { max-height: 90vh; overflow: auto; width: min(90vw, 610px); }

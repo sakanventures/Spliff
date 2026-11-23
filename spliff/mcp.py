@@ -2,59 +2,31 @@
 import json
 import sqlite3
 import sys
+from contextlib import closing
 
-from .catalog import replacement_preference, stats, tracks
+from .catalog import connect, replacement_preference, stats, tracks
 from .discogs import release_details, search_releases
 from .discogs_auth import connect_discogs
 from .review import reviews
 from .nicotine import search as search_nicotine
-from .staged_downloads import queue, review_download
+from .staged_downloads import list_downloads, queue, review_download, transfer_status as read_transfer_status
 from .spectral import analyze_track, analyze_download
-from . import keep_both
-from .nicotine import request as nicotine_request
+from . import keep_both, sync
 from .staged_downloads import public_status
-from .nicotine_bridge.downloads import selection_parts
 from .candidates import refresh as refresh_candidate
 from .artist import library as artist_library, upgrades as artist_upgrades, index_folder, search_for_chat
 
 
-ALBUM_CHOICE = "Do you want to keep both albums, or replace the old album with the new one?"
-RELEASE_FILING = {
-    "folder_template": "<artist>/<category>/[YYYY] <release title>",
-    "categories": ["Albums", "Singles", "EPs", "Mixtapes", "Posthumous Albums"],
-    "artist": ("Look for the artist's existing folder, including verified former or current names. "
-               "Ask when the identity or folder is ambiguous. If no folder matches, preview creating "
-               "an artist folder under the chosen library location and the needed category folder."),
-    "edition": ("Verify the title, release year of the downloaded edition, and release type. "
-                "File deluxe reissues of existing albums under Albums. Use Posthumous Albums for "
-                "albums first released after the artist's death. Peer paths and tags are clues."),
-    "disc_folder_template": "Disc <disc number>",
-    "track_filename_template": "<track number padded to at least two digits> <track title>.<extension>",
-    "disc_layout": ("For releases with multiple verified audio discs, put each disc's tracks in its "
-                    "own folder and restart filenames at 01 for each disc. Keep single-disc tracks "
-                    "in the release folder. Use the matching audio edition's positions and titles. "
-                    "Skip video-only discs that were not downloaded. Keep TITLE tags free of number "
-                    "prefixes and retain disc and track numbers in their own tags. If disc boundaries "
-                    "are unclear or filenames would collide, ask before filing. Keep separate artwork "
-                    "files in the top-level release folder."),
-    "confirmation": ("Show the full proposed destination and any folders to create, along with "
-                     "what happens to the existing release. Get confirmation before making changes."),
-}
-
-
+ALBUM_CHOICE = "Keep both versions or replace the matched originals?"
 def review_for_chat(db, candidate_id, original_track_id=None):
     result = review_download(db, candidate_id, original_track_id)
-    if (result["kind"] == "album" and result["items"]
-            and result["complete"] == len(result["items"]) and not result["kept_both"]):
-        result["release_filing"] = RELEASE_FILING
+    if (result["items"] and result["complete"] == len(result["items"])
+            and not result["kept_both"] and result["comparison"]):
+        original = result["comparison"]["original_track_id"]
+        plans = keep_both.review_plans(db, candidate_id, original)
         result["album_decision"] = {
-            "question": ALBUM_CHOICE,
-            "options": ["Keep both", "Replace"],
-            "replace_originals_destination": {
-                "trash": "Mac Trash", "hidden": "Hidden recovery folder"
-            }[replacement_preference(db)["destination"]],
-            "default": None,
-            "requires_destination_confirmation": True,
+            "question": ALBUM_CHOICE, **plans, "original_track_id": original,
+            "authorization": "Show the reviewed effects and destinations first. The user's choice authorizes that plan; no separate confirmation.",
         }
     return result
 
@@ -64,14 +36,23 @@ def queue_for_chat(db, candidate_id=None, original_track_id=None):
 
 
 def transfer_status(db, candidate_id=None):
-    selection_parts(candidate_id)
-    return public_status(nicotine_request("download_status", selection=candidate_id))
+    with closing(connect(db)) as connection:
+        applied = connection.execute("""
+            SELECT k.mode,k.destination,r.result FROM kept_albums k LEFT JOIN upgrade_results r
+            ON r.candidate=k.candidate WHERE k.candidate=?
+        """, (candidate_id,)).fetchone()
+    if applied:
+        return {"id": candidate_id, "state": "applied", "mode": applied["mode"],
+                "destination": applied["destination"],
+                "completion": json.loads(applied["result"]) if applied["result"] else None}
+    return public_status({key: value for key, value in read_transfer_status(candidate_id).items()
+                          if key != "entries"})
 
 
 def confirm_album_action(db, candidate_id=None, original_track_id=None, mode=None,
                          token=None, confirmed=False):
     if confirmed is not True:
-        raise ValueError("Ask the user to confirm the exact destinations before applying this preview.")
+        raise ValueError("Obtain the user’s explicit Keep both or Replace choice for the presented plan before applying it.")
     return keep_both.apply(db, candidate_id, original_track_id, token, mode)
 
 
@@ -121,6 +102,14 @@ TOOLS = [
      {}, lambda db: {"items": reviews(db)}),
 ]
 DOWNLOAD_TOOLS = [
+    ("sync_music_folder", "Start a folder sync only for a local folder supplied or selected by the user. "
+     "Indexes lossy tracks and schedules automatic Soulseek search, staging and review in Spliff’s local "
+     "dashboard service. This never authorizes changes to music files.",
+     {"folder": {"type": "string"}}, sync.start),
+    ("music_sync_status", "Read folder sync progress and search outcomes.", {}, sync.status),
+    ("list_nicotine_transfers", "List durable Spliff transfer receipts, including waiting, downloaded, "
+     "reviewed and applied jobs. Use this for GUI downloads. list_staged_reviews covers manual uploads only.",
+     {}, lambda db: {"items": list_downloads(db)}),
     ("refresh_nicotine_candidate", "Refresh an expired selected candidate using its saved peer/file "
      "receipt. Only same_peer_and_files preserves a previous explicit download selection. If the "
      "receipt is missing or differs, ask the user to select a fresh candidate. Never downloads.",
@@ -128,14 +117,13 @@ DOWNLOAD_TOOLS = [
     ("nicotine_transfer_status", "Read progress/status for a selected staged candidate. The returned id "
      "is the transfer ID. This does not inspect or change library files.",
      {"candidate_id": {"type": "string"}}, transfer_status),
-    ("preview_album_action", "Only after completed download review, spectral review, and the user's "
-     "Keep both or Replace choice, compute exact destinations and return a confirmation token. "
-     "No library files are moved. Present these paths and wait for explicit confirmation.",
+    ("preview_album_action", "Prepare one mode and its exact destinations before asking the user "
+     "to choose. For routine use, review_nicotine_download returns both reviewed plans together.",
      {"candidate_id": {"type": "string"}, "original_track_id": {"type": "integer", "minimum": 1},
       "mode": {"enum": ["keep", "replace"]}}, preview_album_action),
-    ("confirm_album_action", "Apply only a preview whose exact paths and Keep both/Replace mode the "
-     "user explicitly confirmed. Never infer this from download authorization. Requires the token "
-     "returned by preview_album_action. Protected or changed originals block this action.",
+    ("confirm_album_action", "Apply the reviewed plan selected by the user. Set confirmed=true when "
+     "the user explicitly chooses Keep both or Replace after seeing its effects and destinations. "
+     "Use the matching plan token. A changed plan needs a fresh choice. Do not ask twice for one unchanged plan.",
      {"candidate_id": {"type": "string"}, "original_track_id": {"type": "integer", "minimum": 1},
       "mode": {"enum": ["keep", "replace"]}, "token": {"type": "string"},
       "confirmed": {"type": "boolean"}}, confirm_album_action),
@@ -155,12 +143,9 @@ DOWNLOAD_TOOLS = [
      {"candidate_id": {"type": "string"}, "original_track_id": {"type": "integer", "minimum": 1}},
      queue_for_chat),
     ("review_nicotine_download",
-     "Check a staged download and inspect completed audio. Optionally compare against an indexed "
-     "original track, or an album by passing one track ID from that album. When the result includes "
-     "album_decision, ask the user its question and wait for their choice. Ask even when the edition "
-     "or track counts differ, and explain anything that blocks the chosen action. Follow release_filing "
-     "when proposing where to place the download. Show the exact "
-     "destinations and get confirmation before any library changes.",
+     "Review the completed download from list_nicotine_transfers. Return reviewed Keep both and Replace "
+     "plans with exact destinations, skipped items and tokens. Present these effects before asking "
+     "the user to choose once. Use Advanced spectrum and edition tools for optional inspection.",
      {"candidate_id": {"type": "string"}, "original_track_id": {"type": "integer", "minimum": 1}},
      review_for_chat),
 ]
@@ -186,16 +171,16 @@ REQUIRED = {"search_nicotine": ["query"], "search_discogs_releases": ["artist", 
             "preview_album_action": ["candidate_id", "original_track_id", "mode"],
             "confirm_album_action": ["candidate_id", "original_track_id", "mode", "token", "confirmed"],
             "artist_library": ["artist"], "search_artist_upgrades": ["artist"],
-            "index_music_folder": ["folder"],
+            "index_music_folder": ["folder"], "sync_music_folder": ["folder"],
             "analyze_library_spectrum": ["track_id"], "analyze_download_spectrum": ["candidate_id"],
             "get_discogs_release": ["release_id"], "stage_nicotine_download": ["candidate_id"],
             "review_nicotine_download": ["candidate_id"]}
 WRITES = {"stage_nicotine_download", "connect_discogs", "replacement_preference", "index_music_folder",
-          "confirm_album_action"}
+          "confirm_album_action", "sync_music_folder", "review_nicotine_download", "preview_album_action"}
 OPEN_WORLD = {"search_nicotine", "search_discogs_releases", "get_discogs_release",
               "refresh_nicotine_candidate", "nicotine_transfer_status",
               "search_artist_upgrades",
-              "stage_nicotine_download", "connect_discogs"}
+              "stage_nicotine_download", "connect_discogs", "sync_music_folder"}
 
 VERSIONS = {"2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25"}
 
@@ -210,6 +195,16 @@ def serve(db, search_only=False, allow_downloads=False, allow_discogs=False):
         available.extend(DOWNLOAD_TOOLS)
     if allow_discogs:
         available.extend(DISCOGS_TOOLS)
+    if search_only:
+        instructions = "This connection is remote search-only and cannot inspect the local music library."
+    elif allow_downloads:
+        instructions = ("For a selected folder use sync_music_folder and music_sync_status. "
+                        "Discover existing transfers with list_nicotine_transfers. Handle candidate IDs internally. "
+                        "Present the reviewed options and destinations from review_nicotine_download, then ask "
+                        "the user to choose Keep both or Replace once. Their choice authorizes only that plan. "
+                        "If the plan changes, present updated options and obtain a fresh choice.")
+    else:
+        instructions = "Use artist_library to inspect owned releases and index_music_folder for a selected folder."
     initialized = False
     for line in sys.stdin:
         request_id = None
@@ -240,12 +235,7 @@ def serve(db, search_only=False, allow_downloads=False, allow_discogs=False):
                 "protocolVersion": version if version in VERSIONS else "2025-11-25",
                 "serverInfo": {"name": "spliff", "title": "Spliff", "version": "0.1.0"},
                 "capabilities": {"tools": {}},
-                "instructions": ("This connection is remote search-only and cannot inspect the local music library."
-                    if search_only else "When the user supplies only an artist name, start with "
-                    "search_artist_upgrades. Show their owned releases and formats before remote candidates. "
-                    "If not indexed, request the exact artist folder and use index_music_folder. "
-                    "Ask for explicit candidate selection before staging downloads. Never replace music without "
-                    "the Keep both/Replace choice, spectral review, exact destinations, and confirmation."),
+                "instructions": instructions,
             })
         elif method == "ping":
             respond(request_id, {})

@@ -16,8 +16,8 @@ from .catalog import connect, file_identity, replacement_destination, signature
 from .nicotine_bridge.downloads import selection_parts
 from .nicotine_bridge.wire import staging_root
 from .scanner import AUDIO_FIELDS
-from .staged_downloads import review_download
-from .spectral import analyze_file
+from .staged_downloads import MATCH_ASSESSMENTS, review_download
+from .spectral import analyze_file, compare_measurements
 
 WORK_DIR = ".spliff-keep-both"
 MP3_FOLDER = "MP3"
@@ -42,42 +42,59 @@ def get_plan(db, candidate, original, mode="keep"):
     if review["kept_both"]:
         raise ValueError("This album has already been updated from this download.")
     items = review["items"]
-    if (review["kind"] != "album" or not items or review["complete"] != len(items)
-            or review["originals_without_match"]
-            or any(item.get("assessment") != "possible match"
-                   or item.get("audio", {}).get("codec") != "flac" for item in items)):
-        raise ValueError("A complete FLAC album with one metadata match per original is required.")
+    if not items or review["complete"] != len(items) or not review["comparison"]:
+        raise ValueError("Wait until the download finishes and Spliff identifies the original release.")
+    skipped = []
+    matched = [item for item in items if item.get("assessment") in MATCH_ASSESSMENTS]
+    skipped.extend({"download": item.get("name") or Path(item["source"]).name, "reason": item.get("assessment", "Audio inspection failed")}
+                   for item in items if item not in matched)
     pairs = []
     root = folder = None
+    from .artist import release_folder
     with closing(connect(db)) as connection:
         original_mode = replacement_destination(connection) if mode == "replace" else "keep"
-        for item in items:
+        sync_folders = [Path(row["root"]) for row in connection.execute(
+            "SELECT root FROM sync_targets WHERE candidate=?", (candidate,))]
+        for item in matched:
             track = connection.execute("""
                 SELECT t.*, r.device AS root_device, r.inode AS root_inode
                 FROM tracks t JOIN roots r ON r.path=t.root
                 WHERE t.id=? AND t.present=1 AND t.error IS NULL
             """, (item["original"]["id"],)).fetchone()
-            if not track or track["codec"] != "mp3" or track["protected"]:
-                raise ValueError("Protected originals stay in place. This action requires unprotected MP3s.")
+            if not track or track["quality"] != "lossy" or track["protected"]:
+                skipped.append({"download": item.get("name") or Path(item["source"]).name, "reason": "Original is unavailable, protected, or already lossless"})
+                continue
             track_root = Path(track["root"])
             mp3 = track_root / track["path"]
             if folder is None:
-                root, folder = track_root, mp3.parent
+                root, folder = track_root, track_root / release_folder(track["path"])
                 info = root.stat()
                 if file_identity(info) != (track["root_device"], track["root_inode"]):
                     raise ValueError("The library folder changed. Scan it again before continuing.")
-            if track_root != root or mp3.parent != folder or not mp3.is_relative_to(root):
+            if track_root != root or track_root / release_folder(track["path"]) != folder or not mp3.is_relative_to(root):
                 raise ValueError("Select originals from a single album folder.")
-            if mp3.suffix.lower() != ".mp3":
-                raise ValueError("The original file must have an MP3 extension.")
+
             staged = Path(item["source"])
             mp3_sig = tuple(track[key] for key in ("size", "mtime", "device", "inode"))
-            if path_fingerprint(mp3) != mp3_sig or path_fingerprint(staged) != item["fingerprint"]:
+            if any(not folder.is_relative_to(selected) or not mp3.is_relative_to(selected)
+                   for selected in sync_folders):
+                raise ValueError("The upgrade or recovery destination is outside the selected sync folder.")
+            if path_fingerprint(mp3) != mp3_sig or path_fingerprint(staged) != tuple(item["fingerprint"]):
                 raise ValueError("An audio file changed. Scan or review it again.")
-            pairs.append({"id": track["id"], "mp3": str(mp3), "mp3_sig": mp3_sig,
-                          "flac": str(staged), "flac_sig": item["fingerprint"],
-                          "name": mp3.with_suffix(".flac").name, "audio": item["audio"]})
-    assert folder is not None
+            suffix = staged.suffix.lower()
+            allowed = {"flac", "wav", "wave", "aif", "aiff", "alac", "m4a", "ape", "wv", "dsf"}
+            if suffix.lstrip(".") not in allowed:
+                skipped.append({"download": item.get("name") or Path(item["source"]).name, "reason": "Unsupported lossless file extension"})
+                continue
+            final = mp3.with_suffix(suffix)
+            if final == mp3:
+                final = mp3.with_name(f"{mp3.stem} (Lossless){suffix}")
+            pairs.append({"id": track["id"], "mp3": str(mp3), "mp3_sig": mp3_sig, "codec": track["codec"],
+                          "flac": str(staged), "flac_sig": tuple(item["fingerprint"]), "name": final.name,
+                          "relative": str(final.relative_to(folder)), "audio": item["audio"],
+                          "assessment": item["assessment"]})
+    if not pairs:
+        raise ValueError("No confident, unprotected lossless upgrades are ready to apply.")
     if folder.name.casefold() in {"mp3", ".spliff-originals"}:
         raise ValueError("Choose the main album folder instead of an MP3 archive.")
 
@@ -85,25 +102,63 @@ def get_plan(db, candidate, original, mode="keep"):
         return unicodedata.normalize("NFC", name).casefold()
 
     names = {name_key(path.name) for path in folder.iterdir()}
-    destination_names = {name_key(pair["name"]) for pair in pairs}
-    if len(destination_names) != len(pairs) or names & destination_names:
-        raise ValueError("A FLAC with the same name already exists in the album folder.")
+    available = []
+    destinations = set()
+    for pair in pairs:
+        final = folder / pair["relative"]
+        key = name_key(pair["relative"])
+        if key in destinations or any(name_key(path.name) == name_key(final.name)
+                                      for path in final.parent.iterdir()):
+            skipped.append({"download": Path(pair["flac"]).name, "reason": "Destination already exists"})
+            continue
+        destinations.add(key)
+        available.append(pair)
+    pairs = available
+    if not pairs:
+        raise ValueError("A lossless file with the same name already exists in the album folder.")
     archive_name = {"keep": MP3_FOLDER, "hidden": HIDDEN_ARCHIVE}.get(original_mode)
     if archive_name and name_key(archive_name) in names:
-        raise ValueError("The MP3 destination already exists. Spliff will not combine archives.")
-    if WORK_DIR in names:
-        raise ValueError("A previous Keep both operation needs attention. Check the album folder before retrying.")
+        archive_name = str(Path(archive_name) / candidate)
+        archive_path = folder / archive_name
+        if archive_path.parent.resolve() != archive_path.parent or not archive_path.parent.is_dir() or archive_path.exists():
+            raise ValueError("The originals destination conflicts with an existing file.")
+    if name_key(WORK_DIR) in names:
+        raise ValueError("A previous operation needs attention. Check the album folder before retrying.")
     copies = [pair["flac_sig"][0] for pair in pairs]
     largest = max(max(copies), *(pair["mp3_sig"][0] for pair in pairs))
     if sum(copies) + largest > shutil.disk_usage(folder).free:
         raise ValueError("There is not enough free space to copy the FLAC album.")
     # Decode and render every pair before offering confirmation, and revalidate on apply.
     # This establishes readable spectral evidence, never an authenticity verdict.
+    ready = []
     for pair in pairs:
-        analyze_file(pair["mp3"], pair["mp3_sig"])
-        analyze_file(pair["flac"], pair["flac_sig"])
+        try:
+            original = analyze_file(pair["mp3"], pair["mp3_sig"])
+            download = analyze_file(pair["flac"], pair["flac_sig"])
+            evidence = compare_measurements(original, download)
+            if evidence["status"] in ("Different audio envelope", "Download appears silent"):
+                raise ValueError(evidence["status"])
+            if pair["assessment"] != "possible match" and evidence["status"] != "Similar audio envelope":
+                raise ValueError(pair["assessment"].capitalize() + ": audio did not resolve the discrepancy.")
+            pair["evidence"] = evidence
+            pair["original_digest"] = verified_digest(Path(pair["mp3"]), pair["mp3_sig"])
+            pair["download_digest"] = verified_digest(Path(pair["flac"]), pair["flac_sig"])
+        except (OSError, ValueError) as exc:
+            skipped.append({"download": Path(pair["flac"]).name, "reason": str(exc)})
+        else:
+            ready.append(pair)
+    if not ready:
+        raise ValueError(skipped[-1]["reason"])
+    installed_ids = {pair["id"] for pair in ready}
+    preserved = {track["path"] for track in review["originals_without_match"]
+                 if track["id"] not in installed_ids}
+    preserved.update(item["original"]["path"] for item in items
+                     if item.get("original") and item["original"]["id"] not in installed_ids)
     return {"candidate": candidate, "root": str(root), "folder": str(folder),
-            "album": review["comparison"]["album"], "mode": mode, "pairs": pairs,
+            "album": review["comparison"]["album"] or Path(ready[0]["mp3"]).stem,
+            "mode": mode, "pairs": ready, "skipped": skipped,
+            "edition_evidence": review.get("edition_evidence"),
+            "preserved": sorted(preserved),
             "original_mode": original_mode,
             "original_destination": str(folder / archive_name) if archive_name else "Mac Trash"}
 
@@ -115,8 +170,42 @@ def plan_token(plan):
 def preview(db, candidate, original, mode="keep"):
     plan = get_plan(db, candidate, original, mode)
     destination = Path(plan["folder"])
-    return {"token": plan_token(plan), "album": plan["album"], "destination": str(destination),
-            "archive": plan["original_destination"], "count": len(plan["pairs"])}
+    token = plan_token(plan)
+    archive = plan["original_destination"]
+    preview = {"token": token, "album": plan["album"], "destination": str(destination),
+               "archive": archive, "count": len(plan["pairs"]), "skipped": plan["skipped"],
+               "preserved": plan["preserved"],
+               "files": [{"original": pair["mp3"], "install": str(destination / pair["relative"]),
+                          "audio_evidence": pair["evidence"],
+                          "archive": str(Path(archive) / Path(pair["mp3"]).relative_to(destination))
+                          if plan["original_mode"] != "trash" else "Mac Trash"}
+                         for pair in plan["pairs"]],
+               "edition_evidence": plan["edition_evidence"],
+               "audio_review": "Full decode and spectrum generated. Lossless provenance remains unknown."}
+    with closing(connect(db)) as connection, connection:
+        connection.execute("DELETE FROM upgrade_plans WHERE candidate=? AND mode=? AND original_id=?",
+                           (candidate, mode, original))
+        connection.execute("INSERT INTO upgrade_plans VALUES (?,?,?,?,?)",
+                           (token, candidate, mode, original, json.dumps(preview)))
+    return preview
+
+
+def review_plans(db, candidate, original, *, refresh=False):
+    plans, blocked = {}, {}
+    if not refresh:
+        with closing(connect(db)) as connection:
+            plans = {row["mode"]: json.loads(row["preview"]) for row in connection.execute(
+                "SELECT preview,mode FROM upgrade_plans WHERE candidate=? AND original_id=?",
+                (candidate, original))}
+
+    for mode in ("keep", "replace"):
+        if mode in plans:
+            continue
+        try:
+            plans[mode] = preview(db, candidate, original, mode)
+        except (OSError, ValueError) as exc:
+            blocked[mode] = str(exc)
+    return {"options": plans, "blocked": blocked}
 
 
 def move_exclusive(source, destination):
@@ -140,6 +229,17 @@ def audio_digest(audio):
     for block in iter(lambda: audio.read(1024 * 1024), b""):
         digest.update(block)
     return digest.digest()
+
+
+def verified_digest(path, expected):
+    descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    with os.fdopen(descriptor, "rb") as source:
+        if signature(os.fstat(source.fileno())) != expected:
+            raise ValueError("An audio file changed before verification.")
+        digest = audio_digest(source).hex()
+        if signature(os.fstat(source.fileno())) != expected or path_fingerprint(path) != expected:
+            raise ValueError("An audio file changed during verification.")
+    return digest
 
 
 def copy_then_remove(source, destination):
@@ -242,7 +342,10 @@ def clean_work(folder):
 
 def apply(db, candidate, original, token, mode="keep"):
     plan = get_plan(db, candidate, original, mode)
-    if token != plan_token(plan):
+    with closing(connect(db)) as connection:
+        issued = connection.execute("SELECT 1 FROM upgrade_plans WHERE token=? AND candidate=? AND mode=? AND original_id=?",
+                                    (token, candidate, mode, original)).fetchone()
+    if not issued or token != plan_token(plan):
         raise ValueError("The comparison changed. Review the destination again before confirming.")
     folder, root = Path(plan["folder"]), Path(plan["root"])
     work = folder / WORK_DIR
@@ -258,29 +361,22 @@ def apply(db, candidate, original, token, mode="keep"):
             row = connection.execute(
                 "SELECT root,path,protected,codec,present,error FROM tracks WHERE id=?", (pair["id"],)
             ).fetchone()
-            if not row or tuple(row) != (str(root), str(Path(pair["mp3"]).relative_to(root)), 0, "mp3", 1, None):
+            if not row or tuple(row) != (str(root), str(Path(pair["mp3"]).relative_to(root)), 0, pair["codec"], 1, None):
                 raise ValueError("An original changed in the library. Review the destination again.")
         work.mkdir(mode=0o700)
         try:
             (work / "plan.json").write_text(json.dumps(plan, indent=2), encoding="utf-8")
-            digests = [copy_verified(Path(pair["flac"]), work / pair["name"], pair["flac_sig"])
-                       for pair in plan["pairs"]]
-            archive.mkdir()
-            archive_created = True
+            digests = []
             for pair in plan["pairs"]:
-                source = Path(pair["mp3"])
-                if path_fingerprint(source) != pair["mp3_sig"]:
-                    raise ValueError("An original changed during the operation.")
-                saved = archive / source.name
-                move_exclusive(source, saved)
-                saved_sig = path_fingerprint(saved)
-                moved.append((source, saved, saved_sig))
-                connection.execute(
-                    "UPDATE tracks SET path=?,size=?,mtime=?,device=?,inode=?,present=? WHERE id=?",
-                    (str(saved.relative_to(root)), *saved_sig, int(mode == "keep"), pair["id"]),
-                )
+                temporary = work / "audio" / pair["relative"]
+                temporary.parent.mkdir(parents=True, exist_ok=True)
+                digest = copy_verified(Path(pair["flac"]), temporary, pair["flac_sig"])
+                if digest.hex() != pair["download_digest"]:
+                    raise ValueError("The downloaded audio changed after review.")
+                digests.append(digest)
             for pair, digest in zip(plan["pairs"], digests):
-                temporary, final = work / pair["name"], folder / pair["name"]
+                temporary = work / "audio" / pair["relative"]
+                final = folder / pair["relative"]
                 move_exclusive(temporary, final)
                 fingerprint = path_fingerprint(final)
                 published.append((final, fingerprint))
@@ -291,8 +387,30 @@ def apply(db, candidate, original, token, mode="keep"):
                     (str(root), str(final.relative_to(root)),
                      *(pair["audio"].get(key) for key in AUDIO_FIELDS), *fingerprint),
                 )
+            archive.mkdir()
+            archive_created = True
+            for pair in plan["pairs"]:
+                source = Path(pair["mp3"])
+                if verified_digest(source, pair["mp3_sig"]) != pair["original_digest"]:
+                    raise ValueError("An original changed during the operation.")
+                saved = archive / source.relative_to(folder)
+                saved.parent.mkdir(parents=True, exist_ok=True)
+                move_exclusive(source, saved)
+                saved_sig = path_fingerprint(saved)
+                moved.append((source, saved, saved_sig))
+                connection.execute(
+                    "UPDATE tracks SET path=?,size=?,mtime=?,device=?,inode=?,present=? WHERE id=?",
+                    (str(saved.relative_to(root)), *saved_sig, int(mode == "keep"), pair["id"]),
+                )
             connection.execute("INSERT INTO kept_albums(candidate,destination,mode) VALUES (?,?,?)",
                                (candidate, str(folder), mode))
+            result = {"destination": str(folder), "archive": plan["original_destination"],
+                      "count": len(plan["pairs"]), "upgraded": len(plan["pairs"]),
+                      "preserved": len(plan["preserved"]) + (len(plan["pairs"]) if mode == "keep" else 0),
+                      "skipped": plan["skipped"], "failed": 0,
+                      "trash_pending": str(archive) if original_mode == "trash" else None,
+                      "staging_removed": 0, "work_cleanup_pending": True}
+            connection.execute("INSERT INTO upgrade_results VALUES (?,?)", (candidate, json.dumps(result)))
             connection.commit()
         except BaseException:
             connection.rollback()
@@ -307,7 +425,8 @@ def apply(db, candidate, original, token, mode="keep"):
                         raise ValueError("An archived MP3 changed before rollback.")
                     move_exclusive(saved, source)
                 if archive_created:
-                    archive.rmdir()
+                    for directory, _, _ in os.walk(archive, topdown=False):
+                        Path(directory).rmdir()
             except (OSError, ValueError) as exc:
                 raise ValueError(f"Keep both stopped. Check the recovery plan in {work} before retrying.") from exc
             clean_work(work)
@@ -329,6 +448,9 @@ def apply(db, candidate, original, token, mode="keep"):
         work_cleanup_pending = True
     else:
         work_cleanup_pending = bool(trash_pending)
-    return {"destination": str(folder), "archive": plan["original_destination"],
-            "trash_pending": trash_pending, "count": len(plan["pairs"]),
-            "staging_removed": staging_removed, "work_cleanup_pending": work_cleanup_pending}
+    result.update(trash_pending=trash_pending, staging_removed=staging_removed,
+                  work_cleanup_pending=work_cleanup_pending, failed=int(bool(trash_pending)))
+    with closing(connect(db)) as connection, connection:
+        connection.execute("UPDATE upgrade_results SET result=? WHERE candidate=?",
+                           (json.dumps(result), candidate))
+    return result

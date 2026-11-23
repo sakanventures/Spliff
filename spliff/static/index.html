@@ -10,24 +10,33 @@
 <body>
   <header class="top">
     <div class="brand"><span class="record" aria-hidden="true"></span> Spliff</div>
-    <button id="scan">Scan a folder</button>
   </header>
   <main>
     <nav aria-label="Spliff views">
-      <button id="albums" aria-pressed="true">Albums</button>
+      <button id="sync" aria-pressed="true">Sync</button>
       <button id="downloads" aria-pressed="false">Downloads</button>
       <details id="advanced">
         <summary>Advanced</summary>
         <div class="advanced-menu">
+          <button id="albums" aria-pressed="false">Find albums manually</button>
           <button id="browse" aria-pressed="false">Track index</button>
           <button id="staged" aria-pressed="false">Staged reviews</button>
-          <button id="add-music-mac" type="button" hidden>Add music folder</button>
           <button id="open-settings" type="button">Settings</button>
         </div>
       </details>
     </nav>
     <p id="action-status" class="message" role="status" hidden></p>
-    <section id="albums-panel" aria-label="Albums">
+    <section id="sync-panel" aria-labelledby="sync-heading">
+      <div class="hero">
+        <h1 id="sync-heading">Upgrade your music</h1>
+        <p>Choose a folder. Spliff finds and reviews lossless upgrades before you decide what to keep.</p>
+        <button id="sync-folder" class="primary" type="button">Choose music folder</button>
+      </div>
+      <p id="sync-status" role="status"></p>
+      <button id="sync-downloads" type="button">View downloads</button>
+      <details id="sync-details" hidden><summary>Sync details</summary><ul id="sync-items"></ul></details>
+    </section>
+    <section id="albums-panel" aria-label="Albums" hidden>
       <div id="album-library">
         <div class="hero">
           <h1 id="albums-heading">What album do you want to upgrade?</h1>
@@ -97,11 +106,11 @@
           <div class="download-sidebar-heading">
             <h2>Downloads</h2>
             <details id="add-download">
-              <summary>Add from chat</summary>
+              <summary>Manual download</summary>
               <form id="queue-form">
                 <label>Candidate ID<input id="download-code" required maxlength="48"
                   placeholder="Paste the ID from Spliff Search"></label>
-                <button type="submit">Download to staging</button>
+                <button type="submit">Start download</button>
               </form>
               <small id="queue-status" role="status"></small>
             </details>
@@ -127,7 +136,9 @@
           </div>
           <p id="download-note" class="muted" hidden></p>
           <details id="download-details" hidden>
-            <summary>Track details</summary>
+            <summary>Advanced inspection</summary>
+            <p id="download-edition" class="muted" hidden></p>
+            <div id="download-comparison-control"></div>
             <div id="download-report"></div>
             <details id="download-spectrum-details" hidden>
               <summary>Audio spectrum</summary>
@@ -167,33 +178,10 @@
       <p id="settings-status" role="status"></p>
     </dialog>
     <dialog id="keep-both-dialog" aria-labelledby="keep-both-heading">
-      <div class="dialog-heading">
-        <h2 id="keep-both-heading">Use the FLAC album</h2>
-      </div>
-      <div id="album-actions-description">
-        <p><strong>Keep both</strong> moves the MP3s into a visible <code>MP3</code> subfolder.</p>
-        <p><strong>Replace</strong> installs the FLACs and moves the original MP3s to the destination in Settings.</p>
-      </div>
-      <div id="album-action-preview" hidden>
-        <p id="keep-both-summary"></p>
-        <dl class="keep-destinations">
-          <div><dt>FLAC copies</dt><dd id="flac-destination"></dd></div>
-          <div><dt>Original MP3s</dt><dd id="mp3-destination"></dd></div>
-        </dl>
-        <p>The Nicotine+ download copy is removed after Spliff verifies the saved FLACs.</p>
-        <p id="keep-both-status" role="status"></p>
-      </div>
-      <div class="album-dialog-footer">
-        <button id="cancel-keep-both" type="button" autofocus>Cancel</button>
-        <div id="album-action-choices" class="dialog-actions">
-          <button id="choose-keep-both" type="button">Keep both</button>
-          <button id="choose-replace" class="primary" type="button">Replace</button>
-        </div>
-        <div id="album-action-confirmation" class="dialog-actions" hidden>
-          <button id="back-to-album-actions" type="button">Back</button>
-          <button id="confirm-keep-both" class="primary" type="button" disabled>Confirm</button>
-        </div>
-      </div>
+      <div class="dialog-heading"><h2 id="keep-both-heading">Choose how to upgrade</h2></div>
+      <p id="keep-both-status" role="status"></p>
+      <div id="upgrade-options"></div>
+      <button id="cancel-keep-both" type="button" autofocus>Cancel</button>
     </dialog>
   </main>
 </body>

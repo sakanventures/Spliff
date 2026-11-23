@@ -70,7 +70,7 @@ private struct SpliffSettings: View {
                         Text("Move to Mac Trash").tag("trash")
                         Text("Move to hidden recovery folder").tag("hidden")
                     }.disabled(preference.saved == nil || preference.busy)
-                    Text("Spliff uses this setting after you choose Replace and confirm where the files will go.")
+                    Text("Spliff shows this destination in the plan before you choose Replace.")
                         .foregroundStyle(.secondary)
                     HStack {
                         Button("Save preference") { Task { await preference.load(base: model.dashboardURL, save: true) } }

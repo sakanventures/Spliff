@@ -81,6 +81,7 @@ def album_folders(files, search_id=None):
             "peer": peer, "folder": folder, "matching_files": len(stems),
             **({"candidate_id": f"album-{search_id}-{index}"} if search_id else {}),
             "formats": sorted({file["format"] for file in entries}),
+            "lossless_files": len(selected),
             "flac_files": sum(file["format"] == "flac" for file in selected),
             "total_bytes": sum(file.get("bytes") or 0 for file in selected),
             "quality": [dict(sample_rate=rate, bit_depth=depth) for rate, depth in sorted(

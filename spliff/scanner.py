@@ -9,7 +9,7 @@ from uuid import uuid4
 from .catalog import EXTENSIONS, connect, file_identity, find_probe, initialize, read_audio, signature
 
 AUDIO_FIELDS = ("title", "artist", "album", "codec", "format", "quality",
-                "duration", "bitrate", "sample_rate", "bits")
+                "duration", "bitrate", "sample_rate", "bits", "track_number", "disc_number")
 
 def inside(path, root):
     return path == root or root in path.parents
