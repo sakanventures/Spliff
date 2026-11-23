@@ -12,12 +12,12 @@ from threading import Event, Thread
 from pynicotine import __version__
 from pynicotine.events import events
 from pynicotine.pluginsystem import BasePlugin
-from pynicotine.slskmessages import FileAttribute, UserStatus
+from pynicotine.slskmessages import FileAttribute, TransferResponse, UserStatus
 
-from .downloads import Downloads
+from .downloads import Downloads, enabled
 from .wire import (
     FORMATS, NICOTINE_VERSION, REQUEST_BYTES, RESPONSE_BYTES, VERSION, WINDOW_SECONDS,
-    encode, endpoint, read, search_term,
+    encode, endpoint, read, search_term, staging_root,
 )
 
 LOG = logging.getLogger(__name__)
@@ -84,6 +84,7 @@ class Plugin(BasePlugin):
         self.lock = lock
         self.bridge.plugin = self
         self.path = path
+        self.install_transfer_guard()
         events.connect("file-search-response", self.on_result)
         events.connect("server-disconnect", self.on_disconnect)
         Thread(target=self.bridge.serve_forever, kwargs={"poll_interval": 0.1}, daemon=True).start()
@@ -92,6 +93,13 @@ class Plugin(BasePlugin):
         if self.bridge is None:
             return
         self.stopped.set()
+        try:
+            if self.downloads.allowed:
+                self.downloads.stop()
+        except (OSError, ValueError):
+            LOG.exception("Could not confirm Spliff transfer shutdown")
+        finally:
+            self.restore_transfer_guard()
         if self.active:
             self.finish(self.active, "Spliff Search was disabled.")
         events.disconnect("file-search-response", self.on_result)
@@ -105,9 +113,11 @@ class Plugin(BasePlugin):
     def request(self, request):
         operation = request.get("operation")
         if operation == "status":
-            return {"nicotine_version": __version__, "staging": True}
+            return {"nicotine_version": __version__, "staging": enabled(staging_root())}
         if operation == "queue":
-            return self.on_main(self.queue, request.get("selection"), request.get("roots"))
+            return self.on_main(self.queue, request)
+        if operation == "stop_downloads":
+            return self.on_main(self.downloads.stop)
         if operation == "download_status":
             return self.on_main(self.downloads.status, request.get("selection"))
         if operation != "search":
@@ -145,10 +155,46 @@ class Plugin(BasePlugin):
             future.cancel()
             raise ValueError("Nicotine+ did not confirm the action. Check the staged download before retrying.") from exc
 
-    def queue(self, selection, roots):
+    def queue(self, request):
         if self.stopped.is_set() or self.core.users.login_status == UserStatus.OFFLINE:
             raise ValueError("Connect Nicotine+ to Soulseek before staging a candidate.")
-        return self.downloads.queue(selection, self.searches, roots)
+        return self.downloads.queue(request.get("selection"), self.searches, request.get("roots"),
+                                    request.get("fingerprint"), request.get("source"), request.get("original_id"))
+
+    def install_transfer_guard(self):
+        # Nicotine+ 3.3.11 stores Downloads in a slotted class and can change the size
+        # advertised by the peer just before accepting the transfer.
+        engine = self.core.downloads
+        engine_type = type(engine)
+        enqueue = engine_type._enqueue_transfer
+        accept = engine_type._transfer_request_downloads
+
+        def guarded_enqueue(instance, transfer, bypass_filter=False):
+            if instance is engine and not self.downloads.permit_transfer(transfer, transfer.size):
+                engine.abort_downloads([transfer])
+                return False
+            return enqueue(instance, transfer, bypass_filter=bypass_filter)
+
+        def guarded_accept(instance, message):
+            if instance is engine:
+                transfer = engine.transfers.get(message.username + message.file)
+                if transfer and not self.downloads.permit_transfer(transfer, message.filesize):
+                    engine.abort_downloads([transfer])
+                    return TransferResponse(allowed=False, reason="Cancelled", token=message.token)
+            return accept(instance, message)
+
+        engine_type._enqueue_transfer = guarded_enqueue
+        engine_type._transfer_request_downloads = guarded_accept
+        self.transfer_guard = (
+            ("_enqueue_transfer", guarded_enqueue, enqueue),
+            ("_transfer_request_downloads", guarded_accept, accept),
+        )
+
+    def restore_transfer_guard(self):
+        engine_type = type(self.core.downloads)
+        for name, guard, original in self.transfer_guard:
+            if getattr(engine_type, name) is guard:
+                setattr(engine_type, name, original)
 
     def start(self, search):
         if search.done.is_set():

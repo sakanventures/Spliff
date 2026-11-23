@@ -9,7 +9,7 @@ from .artist import release_folder
 from .catalog import connect
 from .nicotine import availability, search
 from .scanner import scan
-from .staged_downloads import list_downloads, originals, queue, recording_credit, review_download
+from .staged_downloads import list_downloads, originals, recording_credit, review_download
 
 LOG = logging.getLogger(__name__)
 
@@ -109,14 +109,20 @@ def reconcile(db):
         except (ValueError, OSError, sqlite3.Error):
             LOG.exception("Could not prepare transfer %s", job["id"])
 
+    jobs_by_original = {job["original_track_id"]: job for job in reversed(list(jobs.values()))
+                        if job["original_track_id"] is not None and job["state"] != "applied"}
     pending = status(db)["items"]
     for target in pending:
-        if target["state"] in ("queueing", "downloading", "reviewing", "queue_uncertain"):
+        if target["state"] in ("queueing", "downloading", "reviewing", "queue_uncertain", "candidate_ready"):
             job = jobs.get(target["candidate"])
+            if not job and target["state"] == "candidate_ready":
+                job = jobs_by_original.get(target["original_id"])
             if job and job["state"] == "reviewed":
-                update(db, target, "reviewed")
+                update(db, target, "reviewed", candidate=job["id"])
             elif job and job["state"] == "downloaded":
-                update(db, target, "reviewing")
+                update(db, target, "reviewing", candidate=job["id"])
+            elif job and target["state"] == "candidate_ready":
+                update(db, target, "downloading", candidate=job["id"])
             elif target["state"] == "queueing" and not job:
                 update(db, target, "queue_uncertain", "Check Nicotine+ before retrying this transfer.")
     active = {target["original_id"] for target in pending if target["candidate"]}
@@ -151,13 +157,7 @@ def reconcile(db):
     if not candidate:
         update(db, target, "no_candidate", "No suitable peer offer found.")
         return
-    update(db, target, "queueing", candidate=candidate)
-    try:
-        receipt = queue(db, candidate, original_id=target["original_id"])
-    except (ValueError, OSError) as exc:
-        update(db, target, "queue_uncertain", str(exc))
-        return
-    update(db, target, "downloading" if not receipt.get("requires_status_check") else "queue_uncertain")
+    update(db, target, "candidate_ready", "Search the release in Advanced and select a candidate to download.", candidate)
 
 
 def run_worker(db, stop):

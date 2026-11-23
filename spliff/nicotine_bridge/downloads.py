@@ -7,11 +7,50 @@ import stat
 from pathlib import Path, PureWindowsPath
 from time import time
 
-from .wire import album_tracks, staging_root
+from .wire import FORMATS, album_tracks, fingerprint, staging_root
 
 SELECTION = re.compile(r"(track|album)-([0-9a-f]{32})-([0-9]{1,3})")
 MAX_TRACKS = 60
 MAX_BYTES = 8 * 1024**3
+MAX_FILE_BYTES = 1024**3
+INACTIVE = {"Finished", "Paused", "Filtered"}
+ENABLE_FILE = "transfers-enabled"
+
+
+def enabled(root):
+    flag = root / ENABLE_FILE
+    try:
+        info = flag.lstat()
+    except FileNotFoundError:
+        return False
+    return (stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid()
+            and not info.st_mode & 0o077)
+
+
+def audit(root, event, **details):
+    path = root / "transfer-audit.jsonl"
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+    with os.fdopen(fd, "a", encoding="utf-8") as output:
+        info = os.fstat(output.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+            raise ValueError("Spliff needs a private transfer audit file.")
+        output.write(json.dumps({"event": event, "time": int(time()), **details}) + "\n")
+        output.flush()
+        os.fsync(output.fileno())
+
+
+def valid_file(file):
+    path = file["path"]
+    peer = file["peer"]
+    parts = path.split("\\")
+    return (isinstance(peer, str) and 0 < len(peer) <= 64 and peer.isprintable()
+            and len(path.encode("utf-8")) <= 480 and path.isprintable()
+            and "/" not in path and ":" not in path
+            and all(part and part not in {".", ".."} for part in parts)
+            and PureWindowsPath(path).suffix.lower().lstrip(".") == file["format"]
+            and file["format"] in FORMATS and type(file["bytes"]) is int
+            and 0 < file["bytes"] <= MAX_FILE_BYTES)
+
 
 
 def selection_parts(selection):
@@ -48,8 +87,51 @@ class Downloads:
     def __init__(self, core, config):
         self.core = core
         self.config = config
+        self.allowed = {}
 
-    def queue(self, selection, searches, roots):
+    @staticmethod
+    def is_staged(transfer, root):
+        return Path(transfer.folder_path).is_relative_to(root)
+
+    def permit_transfer(self, transfer, claimed_size):
+        root = staging_root()
+        if not self.is_staged(transfer, root):
+            return True
+        key = (transfer.username, transfer.virtual_path, transfer.folder_path)
+        size = self.allowed.get(key)
+        return (enabled(root) and size is not None and transfer.size == size
+                and claimed_size in (0, size))
+
+    def stop(self):
+        root = staging_root()
+        private_folder(root)
+        (root / ENABLE_FILE).unlink(missing_ok=True)
+        self.allowed.clear()
+        transfers = self.core.downloads.transfers
+        matches = []
+        for folder in root.iterdir():
+            if not SELECTION.fullmatch(folder.name):
+                continue
+            try:
+                job = read_job(folder)
+                for entry in job["entries"]:
+                    peer, remote = entry["peer"], entry["remote"]
+                    directory = entry["directory"]
+                    if not re.fullmatch(r"[0-9]{3}", directory):
+                        continue
+                    transfer = transfers.get(peer + remote)
+                    if (transfer and transfer.username == peer and transfer.virtual_path == remote
+                            and transfer.folder_path == str(folder / directory)
+                            and transfer.status not in {"Finished", "Paused"}):
+                        matches.append(transfer)
+            except (ValueError, OSError, KeyError, TypeError):
+                continue
+        if matches:
+            self.core.downloads.abort_downloads(matches)
+        audit(root, "emergency_stop", paused=len(matches))
+        return {"enabled": False, "paused": len(matches)}
+
+    def queue(self, selection, searches, roots, approved=None, source=None, original_id=None):
         kind, search_id, index = selection_parts(selection)
         root = staging_root()
         folder = root / selection
@@ -65,16 +147,36 @@ class Downloads:
         private_folder(root)
         if manifest.is_file():
             return self.status(selection)
+        if not enabled(root):
+            raise ValueError("Spliff transfers are disabled. Enable them locally after reviewing the Nicotine+ queue.")
+        if source not in {"mcp", "dashboard", "manual"} or (
+                original_id is not None and (type(original_id) is not int or original_id < 1)):
+            raise ValueError("Staging requires an explicit candidate selection.")
         search = searches.get(search_id)
         if not search or time() - search[0] > 600 or index >= len(search[1]):
             raise ValueError("This candidate has expired. Search again and select a fresh result.")
         files = search[1]
         anchor = files[index]
         selected = album_tracks(files, anchor) if kind == "album" else [anchor]
+        if (not selected or not all(valid_file(file) for file in selected)
+                or len({file["peer"] + file["path"] for file in selected}) != len(selected)
+                or fingerprint(selected) != approved):
+            raise ValueError("The selected peer files do not match a valid saved allowlist.")
         size = sum(file["bytes"] for file in selected)
         if len(selected) > MAX_TRACKS or size > MAX_BYTES:
             raise ValueError("This candidate exceeds the staging limit of 60 audio files or 8 GiB.")
-        if size > min(shutil.disk_usage(root).free, shutil.disk_usage(incomplete.parent).free):
+        transfers = self.core.downloads.transfers
+        self.allowed = {
+            key: size for key, size in self.allowed.items()
+            if (transfer := transfers.get(key[0] + key[1])) is not None
+            and transfer.folder_path == key[2] and transfer.status not in INACTIVE
+        }
+        outstanding = [transfer for transfer in transfers.values()
+                       if self.is_staged(transfer, root) and transfer.status not in INACTIVE]
+        reserved = sum(transfer.size for transfer in outstanding)
+        if len(outstanding) + len(selected) > MAX_TRACKS or reserved + size > MAX_BYTES:
+            raise ValueError("The outstanding Spliff queue would exceed 60 audio files or 8 GiB.")
+        if reserved + size > min(shutil.disk_usage(root).free, shutil.disk_usage(incomplete.parent).free):
             raise ValueError("There is insufficient space to stage this candidate.")
         if any(file["peer"] + file["path"] in self.core.downloads.transfers for file in selected):
             raise ValueError("A selected file is already in the Nicotine+ transfer list. Choose another candidate.")
@@ -86,18 +188,42 @@ class Downloads:
             entries.append({"peer": file["peer"], "remote": file["path"], "bytes": file["bytes"],
                             "directory": destination.name})
         data = {"id": selection, "query": search[2], "kind": kind, "created": int(time()),
-                "entries": entries}
+                "entries": entries, "source": source, "original_id": original_id, "fingerprint": approved}
         pending = folder / "job.tmp"
         with pending.open("x", encoding="utf-8") as output:
             json.dump(data, output)
             output.flush()
             os.fsync(output.fileno())
         pending.replace(manifest)
-        for entry in entries:
-            self.core.downloads.enqueue_download(
-                entry["peer"], entry["remote"], folder_path=str(folder / entry["directory"]),
-                size=entry["bytes"],
-            )
+        audit(root, "queue_intent", **data)
+        attempted = []
+        try:
+            for entry in entries:
+                if not enabled(root):
+                    raise ValueError("Spliff transfers were disabled during queueing.")
+                peer, remote = entry["peer"], entry["remote"]
+                destination = str(folder / entry["directory"])
+                key = (peer, remote, destination)
+                attempted.append(key)
+                self.allowed[key] = entry["bytes"]
+                self.core.downloads.enqueue_download(peer, remote, folder_path=destination, size=entry["bytes"])
+                transfer = transfers.get(peer + remote)
+                if (transfer is None or transfer.username != peer or transfer.virtual_path != remote
+                        or transfer.folder_path != destination or transfer.size != entry["bytes"]):
+                    raise ValueError("Nicotine+ did not accept the exact staged transfer.")
+            audit(root, "queue_submitted", id=selection, files=len(entries), bytes=size)
+        except Exception:
+            rollback = []
+            for peer, remote, destination in attempted:
+                self.allowed.pop((peer, remote, destination), None)
+                transfer = transfers.get(peer + remote)
+                if (transfer and transfer.username == peer and transfer.virtual_path == remote
+                        and transfer.folder_path == destination):
+                    rollback.append(transfer)
+            if rollback:
+                self.core.downloads.abort_downloads(rollback)
+            audit(root, "queue_interrupted", id=selection, attempted=len(attempted))
+            raise
         return self.status(selection)
 
     def status(self, selection):

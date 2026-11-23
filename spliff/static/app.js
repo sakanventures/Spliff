@@ -809,7 +809,7 @@ async function loadSync() {
     if (request !== syncRequest) return;
     const counts = {};
     for (const item of items) counts[item.current_state] = (counts[item.current_state] || 0) + 1;
-    const labels = {queued: 'Searching', downloading: 'Downloading', queueing: 'Starting', reviewing: 'Reviewing audio', reviewed: 'Reviewed',
+    const labels = {queued: 'Searching', candidate_ready: 'Awaiting selection', downloading: 'Downloading', queueing: 'Starting', reviewing: 'Reviewing audio', reviewed: 'Reviewed',
       applied: 'Applied', no_candidate: 'No offer', search_failed: 'Search failed', queue_uncertain: 'Transfer needs attention'};
     get('sync-status').textContent = Object.entries(counts).map(([key, count]) => `${labels[key]} · ${count}`).join('   ')
       || (folders.length ? 'No eligible upgrades in the selected folders.' : '');

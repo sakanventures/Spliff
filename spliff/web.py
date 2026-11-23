@@ -112,7 +112,7 @@ def serve(db, port):
                     params = parse_qs(urlsplit(self.path).query, max_num_fields=2)
                     selection = params.get("candidate", [None])[0]
                     original = params.get("original", [None])[0]
-                    self.reply_json(queue(db, selection, original_id=int(original) if original else None), 201)
+                    self.reply_json(queue(db, selection, original_id=int(original) if original else None, source="dashboard"), 201)
                     return
                 if parts == ["api", "album-search"]:
                     self.body_length(0)

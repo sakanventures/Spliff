@@ -32,7 +32,7 @@ def review_for_chat(db, candidate_id, original_track_id=None):
 
 
 def queue_for_chat(db, candidate_id=None, original_track_id=None):
-    return queue(db, candidate_id, original_id=original_track_id)
+    return queue(db, candidate_id, original_id=original_track_id, source="mcp")
 
 
 def transfer_status(db, candidate_id=None):
@@ -103,8 +103,8 @@ TOOLS = [
 ]
 DOWNLOAD_TOOLS = [
     ("sync_music_folder", "Start a folder sync only for a local folder supplied or selected by the user. "
-     "Indexes lossy tracks and schedules automatic Soulseek search, staging and review in Spliff’s local "
-     "dashboard service. This never authorizes changes to music files.",
+     "Indexes lossy tracks and searches Soulseek in Spliff’s local dashboard service. "
+     "Each download requires an explicit candidate selection.",
      {"folder": {"type": "string"}}, sync.start),
     ("music_sync_status", "Read folder sync progress and search outcomes.", {}, sync.status),
     ("list_nicotine_transfers", "List durable Spliff transfer receipts, including waiting, downloaded, "
@@ -199,6 +199,7 @@ def serve(db, search_only=False, allow_downloads=False, allow_discogs=False):
         instructions = "This connection is remote search-only and cannot inspect the local music library."
     elif allow_downloads:
         instructions = ("For a selected folder use sync_music_folder and music_sync_status. "
+                        "Ask the user to select each candidate before calling stage_nicotine_download. "
                         "Discover existing transfers with list_nicotine_transfers. Handle candidate IDs internally. "
                         "Present the reviewed options and destinations from review_nicotine_download, then ask "
                         "the user to choose Keep both or Replace once. Their choice authorizes only that plan. "

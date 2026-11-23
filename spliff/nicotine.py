@@ -5,9 +5,10 @@ from collections import defaultdict
 from pathlib import Path, PureWindowsPath
 from tempfile import TemporaryDirectory
 
+from .nicotine_bridge.downloads import ENABLE_FILE, audit, enabled, private_folder
 from .nicotine_bridge.wire import (
     album_key, album_tracks, track_stem,
-    REQUEST_BYTES, RESPONSE_BYTES, VERSION, WINDOW_SECONDS, encode, endpoint, read, search_term,
+    REQUEST_BYTES, RESPONSE_BYTES, VERSION, WINDOW_SECONDS, encode, endpoint, read, search_term, staging_root,
 )
 
 
@@ -42,17 +43,23 @@ def install_plugin(plugins, upgrade=False):
 def request(operation, **arguments):
     payload = encode({"version": VERSION, "operation": operation, **arguments}, REQUEST_BYTES)
     path = endpoint()
+    dispatched = False
     try:
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as connection:
             connection.settimeout(2)
             connection.connect(str(path))
+            dispatched = True
             connection.sendall(payload)
             connection.settimeout(WINDOW_SECONDS + 6)
             with connection.makefile("rb") as stream:
                 response = read(stream, RESPONSE_BYTES)
     except (FileNotFoundError, ConnectionRefusedError) as exc:
         raise ValueError("Open Nicotine+ and enable the Spliff Search plugin in its preferences.") from exc
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
+        if operation == "queue" and dispatched:
+            raise ValueError("Nicotine+ did not confirm the action. Check the staged download before retrying.") from exc
+        if isinstance(exc, ValueError):
+            raise
         raise ValueError("Spliff could not reach Nicotine+. Try again shortly.") from exc
     if response.get("version") != VERSION:
         raise ValueError("The Spliff app and Nicotine+ plugin use different bridge versions.")
@@ -118,3 +125,25 @@ def search(_db, query=None, kind="track", limit=3):
                          "Album counts describe matching files returned during the search window. "
                          "Edition, completeness, and fidelity require verification."),
     }
+
+
+def transfer_control(action):
+    root = staging_root()
+    private_folder(root)
+    flag = root / ENABLE_FILE
+    if action == "enable":
+        audit(root, "local_enable")
+        try:
+            flag.touch(mode=0o600, exist_ok=False)
+        except FileExistsError:
+            if not enabled(root):
+                raise ValueError("The Spliff transfer enable file is invalid.")
+        return {"enabled": True}
+    flag.unlink(missing_ok=True)
+    try:
+        return request("stop_downloads")
+    except (ValueError, OSError) as exc:
+        audit(root, "stop_unconfirmed", error=str(exc))
+        return {"enabled": False, "paused": None,
+                "message": "New staging is disabled. Existing transfer pauses were not confirmed. "
+                           "Disconnect Nicotine+ before inspecting its queue."}

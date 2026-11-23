@@ -19,7 +19,8 @@ from spliff.catalog import connect, replacement_preference, signature, stats, tr
 from spliff import keep_both, mcp, sync
 from spliff.review import protect, reviews, stage
 from spliff.scanner import scan
-from spliff.nicotine_bridge.downloads import Downloads
+from spliff.nicotine_bridge.downloads import Downloads, ENABLE_FILE
+from spliff.nicotine_bridge.wire import fingerprint
 from spliff.staged_downloads import cached_edition, list_downloads, match_item, queue, review_download, suggest_album
 
 @unittest.skipUnless(shutil.which("ffmpeg") and shutil.which("ffprobe"), "Requires FFmpeg")
@@ -116,7 +117,7 @@ class VerticalSlice(unittest.TestCase):
 
         def enqueue(peer, remote, folder_path, size):
             queued.append((peer, remote))
-            transfers[peer + remote] = SimpleNamespace(folder_path=folder_path, status="Queued")
+            transfers[peer + remote] = SimpleNamespace(username=peer, virtual_path=remote, folder_path=folder_path, size=size, status="Queued")
 
         def completed(_peer, remote, size, folder):
             path = Path(folder) / PureWindowsPath(remote).name
@@ -139,9 +140,13 @@ class VerticalSlice(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "outside indexed"):
                 bridge.queue(selection, searches, [str(self.base)])
             self.assertEqual(queued, [])
+            with self.assertRaisesRegex(ValueError, "disabled"):
+                bridge.queue(selection, searches, [str(self.root)])
+            (root / ENABLE_FILE).touch(mode=0o600)
+            approved = fingerprint([flac])
             with self.assertRaisesRegex(ValueError, "expired"):
-                bridge.queue(selection, {identifier: (time() - 601, [flac], "Example")}, [])
-            job = bridge.queue(selection, searches, [str(self.root)])
+                bridge.queue(selection, {identifier: (time() - 601, [flac], "Example")}, [], approved, "manual")
+            job = bridge.queue(selection, searches, [str(self.root)], approved, "manual")
             self.assertEqual(job["complete"], 0)
             self.assertEqual(list_downloads(), [])
             self.assertEqual(job["items"][0]["status"], "Queued")
@@ -237,7 +242,7 @@ class VerticalSlice(unittest.TestCase):
             self.assertNotEqual(match_item(variant, [original], "album", "06 Drivin.flac")[0], "possible match")
 
     @unittest.skipUnless(sys.platform == "darwin", "Requires exclusive macOS rename")
-    def test_sync_persists_transfer_and_applies_selected_partial_plan(self):
+    def test_sync_waits_for_selection_and_applies_selected_partial_plan(self):
         for path, title in ((self.original, "Rare Cut"), (self.root / "Other.mp3", "Unmatched Cut"),
                             (self.root / "Protected.mp3", "Protected Cut"),
                             (self.candidate, "Rare Cut")):
@@ -267,11 +272,20 @@ class VerticalSlice(unittest.TestCase):
 
         with patch("spliff.staged_downloads.staging_root", return_value=staging), \
                 patch("spliff.keep_both.staging_root", return_value=staging), \
-                patch("spliff.staged_downloads.request", side_effect=bridge), \
+                patch("spliff.staged_downloads.request", side_effect=bridge) as request, \
                 patch("spliff.sync.search", return_value={"candidates": [offer]}), \
                 patch("spliff.staged_downloads.search_releases", return_value={"items": []}):
             self.assertEqual(sync.start(self.db, str(self.root))["targets"], 1)
             sync.reconcile(self.db)
+            self.assertEqual(sync.status(self.db)["items"][0]["state"], "candidate_ready")
+            request.assert_not_called()
+            self.assertEqual(list_downloads(self.db), [])
+            original_id = sync.status(self.db)["items"][0]["original_id"]
+            from spliff.candidates import record
+            record(self.db, "Example Album", "album", [offer],
+                   [{"peer": "test", "path": r"Example Album\Rare Cut.flac",
+                     "bytes": self.candidate.stat().st_size, "format": "flac"}])
+            queue(self.db, selection, original_id=original_id)
             self.assertEqual(list_downloads(self.db)[0]["state"], "downloading")
             self.assertEqual(reviews(self.db), [])
             shutil.copyfile(self.candidate, staged)

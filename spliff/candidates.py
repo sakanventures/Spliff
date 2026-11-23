@@ -1,22 +1,23 @@
 """Persist peer/file observations so an expired selection can be refreshed conservatively."""
-import hashlib
-import json
 import sqlite3
 from contextlib import closing
 from pathlib import Path
 
-from .nicotine_bridge.wire import album_tracks
+from .nicotine_bridge.wire import album_tracks, fingerprint
 
 
 def cache_path(db):
     return Path(db).with_name('candidate-receipts.sqlite')
 
 
-def fingerprint(files):
-    fields = ('peer', 'path', 'bytes', 'format', 'sample_rate', 'bit_depth')
-    entries = [{key: item.get(key) for key in fields} for item in files]
-    entries.sort(key=lambda item: (item['peer'], item['path']))
-    return hashlib.sha256(json.dumps(entries, sort_keys=True).encode()).hexdigest()
+def saved_fingerprint(db, candidate):
+    path = cache_path(db)
+    if path.is_file():
+        with closing(sqlite3.connect(path)) as connection:
+            row = connection.execute("SELECT fingerprint FROM offers WHERE id=?", (candidate,)).fetchone()
+            if row:
+                return row[0]
+    return None
 
 
 def record(db, query, kind, candidates, files):

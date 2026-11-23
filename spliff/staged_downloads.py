@@ -9,6 +9,7 @@ from contextlib import closing, nullcontext
 from pathlib import Path, PureWindowsPath
 from time import monotonic
 
+from .candidates import saved_fingerprint
 from .catalog import connect, find_probe, read_audio, signature
 from .artist import release_folder
 from .discogs import release_details, search_releases
@@ -17,7 +18,9 @@ from .nicotine_bridge.downloads import SELECTION, read_job, selection_parts
 from .nicotine_bridge.wire import staging_root
 
 
-def queue(db, candidate_id=None, *, original_id=None):
+def queue(db, candidate_id=None, *, original_id=None, source="manual"):
+    if source not in {"mcp", "dashboard", "manual"}:
+        raise ValueError("Staging requires an explicit candidate selection.")
     kind, _, _ = selection_parts(candidate_id)
     if original_id is not None:
         indexed = originals(db, original_id, kind)
@@ -25,6 +28,15 @@ def queue(db, candidate_id=None, *, original_id=None):
             raise ValueError("Choose an indexed album to compare.")
     with closing(connect(db)) as connection:
         roots = [row["path"] for row in connection.execute("SELECT path FROM roots")]
+    try:
+        read_job(staging_root() / candidate_id)
+    except ValueError:
+        existing = False
+    else:
+        existing = True
+    receipt = None if existing else saved_fingerprint(db, candidate_id)
+    if not existing and not receipt:
+        raise ValueError("Search again and explicitly select a candidate with a saved peer/file receipt.")
     if original_id is not None:
         with closing(connect(db)) as connection, connection:
             connection.execute("""
@@ -32,7 +44,9 @@ def queue(db, candidate_id=None, *, original_id=None):
                 ON CONFLICT(candidate) DO UPDATE SET original_id=excluded.original_id
             """, (candidate_id, original_id))
     try:
-        result = request("queue", selection=candidate_id, roots=roots)
+        result = (request("download_status", selection=candidate_id) if existing else
+                  request("queue", selection=candidate_id, roots=roots, fingerprint=receipt,
+                          source=source, original_id=original_id))
     except ValueError as exc:
         if "did not confirm the action" not in str(exc):
             raise

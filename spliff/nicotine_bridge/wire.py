@@ -1,10 +1,11 @@
 """One bounded JSON request and response on a same-user Unix socket."""
+import hashlib
 import json
 import os
 import stat
 from pathlib import Path, PureWindowsPath
 
-VERSION = 1
+VERSION = 2
 NICOTINE_VERSION = "3.3.11"
 REQUEST_BYTES = 64 * 1024
 RESPONSE_BYTES = 512 * 1024
@@ -67,3 +68,11 @@ def album_tracks(files, anchor):
         if stem not in selected or file["format"] == "flac":
             selected[stem] = file
     return sorted(selected.values(), key=track_stem)
+
+
+def fingerprint(files):
+    """Bind a staging request to the exact observed peer paths and sizes."""
+    fields = ("peer", "path", "bytes", "format", "sample_rate", "bit_depth")
+    entries = [{key: item.get(key) for key in fields} for item in files]
+    entries.sort(key=lambda item: (item["peer"], item["path"]))
+    return hashlib.sha256(json.dumps(entries, sort_keys=True).encode()).hexdigest()

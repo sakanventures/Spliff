@@ -9,7 +9,7 @@ from . import mcp, sync, web
 from .catalog import initialize
 from .discogs_auth import setup_discogs
 from .review import protect, stage
-from .nicotine import install_plugin, request
+from .nicotine import install_plugin, request, transfer_control
 from .scanner import scan
 from .spectral import analyze_track
 from .artist import library as artist_library, upgrades as artist_upgrades
@@ -45,6 +45,8 @@ def main():
     installer.add_argument("--upgrade", action="store_true", help="Update an existing Spliff Search plugin")
     installer.add_argument("--plugins-dir", type=Path,
                            default=Path.home() / ".local/share/nicotine/plugins")
+    control = commands.add_parser("nicotine-downloads", help="Enable or stop Spliff transfers locally")
+    control.add_argument("action", choices=("enable", "stop"))
     commands.add_parser("nicotine-status", help="Check whether the Nicotine+ bridge is available")
     commands.add_parser("discogs-setup", help="Open a one-time local Discogs setup page")
     for action in ("protect", "unprotect"):
@@ -74,6 +76,9 @@ def main():
             return 0
         if args.command == "install-nicotine-plugin":
             print(install_plugin(args.plugins_dir, upgrade=args.upgrade))
+            return 0
+        if args.command == "nicotine-downloads":
+            print(json.dumps(transfer_control(args.action)))
             return 0
         if args.command == "nicotine-status":
             print(json.dumps(request("status")))

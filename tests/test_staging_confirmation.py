@@ -13,6 +13,9 @@ class StagingConfirmation(unittest.TestCase):
         self.db = Path(self.temp.name) / 'catalog.sqlite'
         initialize(self.db)
         self.selection = 'album-' + 'a' * 32 + '-0'
+        from spliff.candidates import record
+        files = [{"peer": "test", "path": "Album\\01.flac", "bytes": 100, "format": "flac"}]
+        record(self.db, "Album", "album", [{"candidate_id": self.selection}], files)
 
     def test_uncertain_queue_is_reconciled_without_duplicate_queue(self):
         status = {'id': self.selection, 'items': [], 'complete': 0}
