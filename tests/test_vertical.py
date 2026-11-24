@@ -7,16 +7,19 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from http.server import ThreadingHTTPServer
 from pathlib import Path, PureWindowsPath
 from time import time
+from queue import Queue
+from threading import Thread
 from types import SimpleNamespace
 from unittest.mock import patch
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
 from spliff.catalog import connect, replacement_preference, signature, stats, tracks
-from spliff import keep_both, mcp, sync
+from spliff import keep_both, mcp, sync, web
 from spliff.review import protect, reviews, stage
 from spliff.scanner import scan
 from spliff.nicotine_bridge.downloads import Downloads, ENABLE_FILE
@@ -295,15 +298,12 @@ class VerticalSlice(unittest.TestCase):
             old = decision["options"]["replace"]
             self.assertEqual(old["count"], 1)
             self.assertCountEqual(old["preserved"], ["Other.mp3", "Protected.mp3"])
+            self.assertNotIn("token", old)
+            self.assertIn(f"review_candidate={selection}", decision["approval_url"])
             self.assertTrue(self.original.exists())
             replacement_preference(self.db, "hidden")
-            with self.assertRaisesRegex(ValueError, "comparison changed"):
-                mcp.confirm_album_action(self.db, selection, decision["original_track_id"],
-                                         "replace", old["token"], confirmed=True)
-            self.assertTrue(self.original.exists())
             plan = keep_both.preview(self.db, selection, decision["original_track_id"], "replace")
-            result = mcp.confirm_album_action(self.db, selection, decision["original_track_id"],
-                                              "replace", plan["token"], confirmed=True)
+            result = keep_both.apply(self.db, selection, decision["original_track_id"], plan["token"], "replace")
             self.assertEqual(result["upgraded"], 1)
             self.assertEqual(result["preserved"], 2)
             self.assertTrue((self.root / "Protected.mp3").exists())
@@ -375,7 +375,12 @@ class VerticalSlice(unittest.TestCase):
             def trash(command, **_options):
                 self.assertEqual(command[0], "/usr/bin/trash")
                 self.assertEqual(self.original.with_suffix(".flac").read_bytes(), self.candidate.read_bytes())
-                Path(command[1]).rename(self.base / "Test Trash")
+                item = Path(command[1])
+                self.assertTrue(item.is_file())
+                self.assertEqual(item.name, self.original.name)
+                test_trash = self.base / "Test Trash"
+                test_trash.mkdir(exist_ok=True)
+                item.rename(test_trash / item.name)
 
             with patch("spliff.keep_both.subprocess.run", side_effect=trash):
                 result = keep_both.apply(self.db, selection, indexed["id"], replace["token"], mode="replace")
@@ -410,16 +415,30 @@ class VerticalSlice(unittest.TestCase):
         self.assertEqual((archive / self.original.name).read_bytes(), original_bytes)
 
     @unittest.skipUnless(sys.platform == "darwin", "Requires exclusive macOS rename")
+    def test_trash_failure_keeps_the_verified_original_and_download_recoverable(self):
+        indexed, report = self.keep_both_fixture()
+        selection = self.album_selection
+        original_bytes = self.original.read_bytes()
+        with patch.object(keep_both, "review_download", return_value=report):
+            plan = keep_both.preview(self.db, selection, indexed["id"], "replace")
+            with patch.object(keep_both.subprocess, "run", side_effect=OSError("Trash unavailable")):
+                result = keep_both.apply(self.db, selection, indexed["id"], plan["token"], "replace")
+        self.assertEqual((Path(result["trash_pending"]) / self.original.name).read_bytes(), original_bytes)
+        self.assertTrue((Path(result["recovery_path"]) / "plan.json").is_file())
+        self.assertTrue(Path(report["items"][0]["source"]).is_file())
+        self.assertEqual(self.original.with_suffix(".flac").read_bytes(), self.candidate.read_bytes())
+
+    @unittest.skipUnless(sys.platform == "darwin", "Requires exclusive macOS rename")
     def test_keep_both_rolls_back_when_publication_fails(self):
         indexed, report = self.keep_both_fixture()
         original_bytes = self.original.read_bytes()
         selection = self.album_selection
         move = keep_both.move_exclusive
 
-        def fail_on_flac(source, destination):
+        def fail_on_flac(source, destination, **kwargs):
             if destination.suffix == ".flac":
                 raise OSError("Simulated publication failure")
-            move(source, destination)
+            return move(source, destination, **kwargs)
 
         with patch("spliff.keep_both.review_download", return_value=report):
             plan = keep_both.preview(self.db, selection, indexed["id"])
@@ -440,19 +459,20 @@ class VerticalSlice(unittest.TestCase):
         original_bytes, staged_bytes = self.original.read_bytes(), source.read_bytes()
         move = keep_both.move_exclusive
 
-        def corrupt_published_flac(temporary, final):
-            move(temporary, final)
+        def corrupt_published_flac(temporary, final, **kwargs):
+            fingerprint = move(temporary, final, **kwargs)
             if final.suffix == ".flac":
                 final.write_bytes(b"\0" * len(staged_bytes))
+            return fingerprint
 
         with patch("spliff.keep_both.review_download", return_value=report):
             plan = keep_both.preview(self.db, selection, indexed["id"])
             with patch("spliff.keep_both.move_exclusive", side_effect=corrupt_published_flac):
-                with self.assertRaisesRegex(ValueError, "could not be verified"):
+                with self.assertRaisesRegex(ValueError, "Check the recovery plan"):
                     keep_both.apply(self.db, selection, indexed["id"], plan["token"])
         self.assertEqual(self.original.read_bytes(), original_bytes)
         self.assertEqual(source.read_bytes(), staged_bytes)
-        self.assertFalse(self.original.with_suffix(".flac").exists())
+        self.assertEqual(self.original.with_suffix(".flac").read_bytes(), b"\0" * len(staged_bytes))
 
     @unittest.skipUnless(sys.platform == "darwin", "Requires exclusive macOS rename")
     def test_cleanup_failure_leaves_the_successful_import_in_place(self):
@@ -477,18 +497,163 @@ class VerticalSlice(unittest.TestCase):
         self.assertEqual((self.root / "MP3" / self.original.name).read_bytes(), original_bytes)
         self.assertEqual([item["codec"] for item in tracks(self.db)["items"]], ["mp3", "flac"])
 
+    @unittest.skipUnless(sys.platform == "darwin", "Requires exclusive macOS rename")
+    def test_local_approval_is_required_and_bound_to_one_displayed_plan(self):
+        indexed, report = self.keep_both_fixture()
+        selection = self.album_selection
+        replacement_preference(self.db, "hidden")
+        started = Queue()
+
+        def bind(address, handler):
+            server = ThreadingHTTPServer(address, handler)
+            started.put(server)
+            return server
+
+        with patch.object(keep_both, "review_download", return_value=report), \
+                patch.object(web, "ThreadingHTTPServer", side_effect=bind), \
+                patch.object(sync, "run_worker"):
+            thread = Thread(target=web.serve, args=(self.db, 0), daemon=True)
+            thread.start()
+            server = started.get(timeout=5)
+            try:
+                base = f"http://127.0.0.1:{server.server_port}"
+                headers = {"Origin": base, "X-Spliff-Action": "dashboard"}
+                comparison = {"candidate": selection, "original": indexed["id"]}
+                options = base + "/api/upgrade-options?" + urlencode(comparison)
+
+                def post(url, request_headers):
+                    with urlopen(Request(url, data=b"", headers=request_headers), timeout=10) as response:
+                        return json.load(response)
+
+                plans = post(options, headers)["options"]
+                token = plans["replace"]["token"]
+                apply_url = base + "/api/keep-both?" + urlencode({**comparison, "mode": "replace", "token": token})
+                approval = {"X-Spliff-Approval": plans["replace"]["approval"]}
+                for denied, status in (
+                    (headers, 400),
+                    ({**headers, "X-Spliff-Approval": plans["keep"]["approval"]}, 400),
+                    ({**headers, **approval, "Origin": "https://example.com"}, 403),
+                ):
+                    with self.assertRaises(HTTPError) as rejected:
+                        post(apply_url, denied)
+                    self.assertEqual(rejected.exception.code, status)
+                    rejected.exception.close()
+                    self.assertTrue(self.original.exists())
+                result = post(apply_url, {**headers, **approval})
+                self.assertEqual(result["upgraded"], 1)
+                self.assertTrue((Path(result["archive"]) / self.original.name).is_file())
+                with self.assertRaises(HTTPError) as repeated:
+                    post(apply_url, {**headers, **approval})
+                self.assertIn("Open the local upgrade review again", json.load(repeated.exception)["error"])
+                repeated.exception.close()
+            finally:
+                server.shutdown()
+                thread.join(timeout=5)
+
+    @unittest.skipUnless(sys.platform == "darwin", "Requires exclusive macOS rename")
+    def test_upgrade_refuses_a_library_swapped_after_plan_validation(self):
+        indexed, report = self.keep_both_fixture()
+        selection = self.album_selection
+        original_bytes = self.original.read_bytes()
+        outside = self.base.resolve() / "Unrelated"
+        outside.mkdir()
+        sentinel = outside / self.original.name
+        sentinel.write_bytes(b"unrelated")
+        detached = self.base.resolve() / "Detached library"
+        create = keep_both.create_directory
+
+        def swap_before_work(path, identities):
+            self.root.rename(detached)
+            self.root.symlink_to(outside, target_is_directory=True)
+            return create(path, identities)
+
+        with patch.object(keep_both, "review_download", return_value=report):
+            plan = keep_both.preview(self.db, selection, indexed["id"], "replace")
+            with patch.object(keep_both, "create_directory", side_effect=swap_before_work):
+                with self.assertRaises((OSError, ValueError)):
+                    keep_both.apply(self.db, selection, indexed["id"], plan["token"], "replace")
+        self.assertEqual(sentinel.read_bytes(), b"unrelated")
+        self.assertEqual(list(outside.iterdir()), [sentinel])
+        self.assertEqual((detached / self.original.name).read_bytes(), original_bytes)
+
+    @unittest.skipUnless(sys.platform == "darwin", "Requires exclusive macOS rename")
+    def test_cleanup_preserves_an_unexpected_workspace_file_and_recovery_plan(self):
+        indexed, report = self.keep_both_fixture()
+        selection = self.album_selection
+        unexpected = self.root / keep_both.WORK_DIR / "audio" / "Personal notes"
+        move = keep_both.move_exclusive
+
+        def add_unexpected(source, destination, **kwargs):
+            if destination.suffix == ".flac":
+                unexpected.write_bytes(b"keep me")
+            return move(source, destination, **kwargs)
+
+        with patch.object(keep_both, "review_download", return_value=report):
+            plan = keep_both.preview(self.db, selection, indexed["id"])
+            with patch.object(keep_both, "move_exclusive", side_effect=add_unexpected):
+                result = keep_both.apply(self.db, selection, indexed["id"], plan["token"])
+        self.assertEqual(unexpected.read_bytes(), b"keep me")
+        self.assertTrue(result["work_cleanup_pending"])
+        self.assertTrue((Path(result["recovery_path"]) / "plan.json").is_file())
+
+    @unittest.skipUnless(sys.platform == "darwin", "Requires exclusive macOS rename")
+    def test_crash_after_first_original_move_leaves_a_recovery_plan(self):
+        indexed, report = self.keep_both_fixture()
+        selection = self.album_selection
+        original_bytes = self.original.read_bytes()
+        staged = Path(report["items"][0]["source"])
+        with patch.object(keep_both, "review_download", return_value=report):
+            plan = keep_both.preview(self.db, selection, indexed["id"], "replace")
+        script = """
+import json, os, sys
+from pathlib import Path
+from unittest.mock import patch
+from spliff import keep_both
+report = json.load(sys.stdin)
+db, selection, original, token, staging = sys.argv[1:]
+move = keep_both.move_exclusive
+def interrupt(source, destination, **kwargs):
+    fingerprint = move(source, destination, **kwargs)
+    if source.suffix == ".mp3":
+        os._exit(42)
+    return fingerprint
+with patch.object(keep_both, "review_download", return_value=report), \\
+     patch.object(keep_both, "staging_root", return_value=Path(staging)), \\
+     patch.object(keep_both, "move_exclusive", side_effect=interrupt):
+    keep_both.apply(Path(db), selection, int(original), token, "replace")
+"""
+        unrelated = self.root / "Personal notes"
+        unrelated.write_bytes(b"keep me")
+        killed = subprocess.run(
+            [sys.executable, "-c", script, str(self.db), selection, str(indexed["id"]),
+             plan["token"], str(staged.parents[2])],
+            input=json.dumps(report), text=True, capture_output=True, timeout=15)
+        self.assertEqual(killed.returncode, 42, killed.stderr)
+        journal = self.root / keep_both.WORK_DIR / "plan.json"
+        pair = json.loads(journal.read_text())["pairs"][0]
+        self.assertEqual(Path(pair["recovery"]).read_bytes(), original_bytes)
+        self.assertEqual(Path(pair["installed"]).read_bytes(), self.candidate.read_bytes())
+        self.assertEqual(unrelated.read_bytes(), b"keep me")
+        self.assertTrue(staged.exists())
+        self.assertFalse(self.original.exists())
+        with patch.object(keep_both, "review_download", return_value=report):
+            with self.assertRaises((OSError, ValueError)):
+                keep_both.apply(self.db, selection, indexed["id"], plan["token"], "replace")
+
     @unittest.skipUnless(sys.platform == "darwin", "Exercises the macOS fallback")
     def test_keep_both_copy_fallback_refuses_conflicts(self):
         source = self.original.resolve()
         destination = source.parent / "copy.mp3"
         expected = source.read_bytes()
         destination.write_bytes(b"pre-existing")
-        with self.assertRaises(FileExistsError):
-            keep_both.copy_then_remove(source, destination)
-        self.assertEqual(source.read_bytes(), expected)
-        self.assertEqual(destination.read_bytes(), b"pre-existing")
-        destination.unlink()
-        keep_both.copy_then_remove(source, destination)
+        with keep_both.open_directory(source.parent, {}) as directory:
+            fingerprint = keep_both.path_fingerprint(source)
+            with self.assertRaises(FileExistsError):
+                keep_both.copy_then_remove(directory, source.name, directory, destination.name, fingerprint)
+            self.assertEqual(source.read_bytes(), expected)
+            self.assertEqual(destination.read_bytes(), b"pre-existing")
+            destination.unlink()
+            keep_both.copy_then_remove(directory, source.name, directory, destination.name, fingerprint)
         self.assertFalse(source.exists())
         self.assertEqual(destination.read_bytes(), expected)
 

@@ -3,6 +3,7 @@ import json
 import sqlite3
 import sys
 from contextlib import closing
+from urllib.parse import urlencode
 
 from .catalog import connect, replacement_preference, stats, tracks
 from .discogs import release_details, search_releases
@@ -18,15 +19,21 @@ from .artist import library as artist_library, upgrades as artist_upgrades, inde
 
 
 ALBUM_CHOICE = "Keep both versions or replace the matched originals?"
-def review_for_chat(db, candidate_id, original_track_id=None):
+
+
+def review_for_chat(db, candidate_id, original_track_id=None, *, dashboard_port=8765):
     result = review_download(db, candidate_id, original_track_id)
     if (result["items"] and result["complete"] == len(result["items"])
             and not result["kept_both"] and result["comparison"]):
         original = result["comparison"]["original_track_id"]
         plans = keep_both.review_plans(db, candidate_id, original)
+        plans["options"] = {mode: public_plan(plan) for mode, plan in plans["options"].items()}
+        query = urlencode({"review_candidate": candidate_id, "review_original": original})
         result["album_decision"] = {
             "question": ALBUM_CHOICE, **plans, "original_track_id": original,
-            "authorization": "Show the reviewed effects and destinations first. The user's choice authorizes that plan; no separate confirmation.",
+            "approval_url": f"http://127.0.0.1:{dashboard_port}/?{query}",
+            "authorization": "Show both plans and their exact destinations. Give the user the approval link "
+                             "to open on the Mac running Spliff and choose there. Chat cannot apply either plan.",
         }
     return result
 
@@ -49,15 +56,12 @@ def transfer_status(db, candidate_id=None):
                           if key != "entries"})
 
 
-def confirm_album_action(db, candidate_id=None, original_track_id=None, mode=None,
-                         token=None, confirmed=False):
-    if confirmed is not True:
-        raise ValueError("Obtain the user’s explicit Keep both or Replace choice for the presented plan before applying it.")
-    return keep_both.apply(db, candidate_id, original_track_id, token, mode)
-
-
 def preview_album_action(db, candidate_id=None, original_track_id=None, mode=None):
-    return keep_both.preview(db, candidate_id, original_track_id, mode)
+    return public_plan(keep_both.preview(db, candidate_id, original_track_id, mode))
+
+
+def public_plan(plan):
+    return {key: value for key, value in plan.items() if key != "token"}
 
 
 NICOTINE_TOOL = (
@@ -121,12 +125,6 @@ DOWNLOAD_TOOLS = [
      "to choose. For routine use, review_nicotine_download returns both reviewed plans together.",
      {"candidate_id": {"type": "string"}, "original_track_id": {"type": "integer", "minimum": 1},
       "mode": {"enum": ["keep", "replace"]}}, preview_album_action),
-    ("confirm_album_action", "Apply the reviewed plan selected by the user. Set confirmed=true when "
-     "the user explicitly chooses Keep both or Replace after seeing its effects and destinations. "
-     "Use the matching plan token. A changed plan needs a fresh choice. Do not ask twice for one unchanged plan.",
-     {"candidate_id": {"type": "string"}, "original_track_id": {"type": "integer", "minimum": 1},
-      "mode": {"enum": ["keep", "replace"]}, "token": {"type": "string"},
-      "confirmed": {"type": "boolean"}}, confirm_album_action),
     ("analyze_download_spectrum", "Generate a spectrogram for one completed download and its matched "
      "original when available. Review before Keep both or Replace. Index is zero-based. "
      "Do not infer genuine lossless provenance from spectral content alone.",
@@ -144,8 +142,8 @@ DOWNLOAD_TOOLS = [
      queue_for_chat),
     ("review_nicotine_download",
      "Review the completed download from list_nicotine_transfers. Return reviewed Keep both and Replace "
-     "plans with exact destinations, skipped items and tokens. Present these effects before asking "
-     "the user to choose once. Use Advanced spectrum and edition tools for optional inspection.",
+     "plans with exact destinations, skipped items and a local approval link. Present the plans and "
+     "give the user the link to choose on their Mac. Use Advanced spectrum and edition tools for optional inspection.",
      {"candidate_id": {"type": "string"}, "original_track_id": {"type": "integer", "minimum": 1}},
      review_for_chat),
 ]
@@ -169,14 +167,13 @@ REQUIRED = {"search_nicotine": ["query"], "search_discogs_releases": ["artist", 
             "nicotine_transfer_status": ["candidate_id"],
             "refresh_nicotine_candidate": ["candidate_id"],
             "preview_album_action": ["candidate_id", "original_track_id", "mode"],
-            "confirm_album_action": ["candidate_id", "original_track_id", "mode", "token", "confirmed"],
             "artist_library": ["artist"], "search_artist_upgrades": ["artist"],
             "index_music_folder": ["folder"], "sync_music_folder": ["folder"],
             "analyze_library_spectrum": ["track_id"], "analyze_download_spectrum": ["candidate_id"],
             "get_discogs_release": ["release_id"], "stage_nicotine_download": ["candidate_id"],
             "review_nicotine_download": ["candidate_id"]}
 WRITES = {"stage_nicotine_download", "connect_discogs", "replacement_preference", "index_music_folder",
-          "confirm_album_action", "sync_music_folder", "review_nicotine_download", "preview_album_action"}
+          "sync_music_folder", "review_nicotine_download", "preview_album_action"}
 OPEN_WORLD = {"search_nicotine", "search_discogs_releases", "get_discogs_release",
               "refresh_nicotine_candidate", "nicotine_transfer_status",
               "search_artist_upgrades",
@@ -184,7 +181,7 @@ OPEN_WORLD = {"search_nicotine", "search_discogs_releases", "get_discogs_release
 
 VERSIONS = {"2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25"}
 
-def serve(db, search_only=False, allow_downloads=False, allow_discogs=False):
+def serve(db, search_only=False, allow_downloads=False, allow_discogs=False, dashboard_port=8765):
     local_search = ("search_nicotine", "For a bare artist name, inspect the owned local releases first "
         "and search for their upgrades. Defaults to auto: an unindexed name returns instructions to "
         "index the artist folder. For a specific remote track or album request, set kind explicitly. "
@@ -201,9 +198,9 @@ def serve(db, search_only=False, allow_downloads=False, allow_discogs=False):
         instructions = ("For a selected folder use sync_music_folder and music_sync_status. "
                         "Ask the user to select each candidate before calling stage_nicotine_download. "
                         "Discover existing transfers with list_nicotine_transfers. Handle candidate IDs internally. "
-                        "Present the reviewed options and destinations from review_nicotine_download, then ask "
-                        "the user to choose Keep both or Replace once. Their choice authorizes only that plan. "
-                        "If the plan changes, present updated options and obtain a fresh choice.")
+                        "Present the reviewed options and destinations from review_nicotine_download and give "
+                        "the user its local approval link. The user chooses Keep both or Replace on their Mac. "
+                        "Read nicotine_transfer_status for the outcome.")
     else:
         instructions = "Use artist_library to inspect owned releases and index_music_folder for a selected folder."
     initialized = False
@@ -258,7 +255,10 @@ def serve(db, search_only=False, allow_downloads=False, allow_discogs=False):
                 respond(request_id, error=(-32602, "Unknown tool or invalid arguments"))
                 continue
             try:
-                payload = tool[3](db, **arguments)
+                if tool[3] is review_for_chat:
+                    payload = review_for_chat(db, dashboard_port=dashboard_port, **arguments)
+                else:
+                    payload = tool[3](db, **arguments)
                 if tool[0] in ("analyze_library_spectrum", "analyze_download_spectrum"):
                     sources = {"original": payload} if "image_base64" in payload else payload
                     content = []

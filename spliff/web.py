@@ -1,9 +1,11 @@
 """Local dashboard and explicitly requested catalog actions."""
 import json
+import secrets
 import shutil
 import subprocess
 from tempfile import TemporaryDirectory
-from threading import Event, Thread
+from threading import Event, Lock, Thread
+from time import monotonic
 import sqlite3
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -23,6 +25,29 @@ ASSETS = {"/": ("index.html", "text/html"), "/app.css": ("app.css", "text/css"),
           "/app.js": ("app.js", "text/javascript")}
 
 def serve(db, port):
+    approval_lock = Lock()
+    approvals = {}
+
+    def issue_approvals(candidate, original, plans):
+        now = monotonic()
+        with approval_lock:
+            for key, (expiry, _) in list(approvals.items()):
+                if expiry <= now:
+                    del approvals[key]
+            for mode, plan in plans["options"].items():
+                if len(approvals) >= 256:
+                    del approvals[next(iter(approvals))]
+                approval = secrets.token_urlsafe(32)
+                approvals[approval] = (now + 15 * 60, (candidate, original, plan["token"], mode))
+                plan["approval"] = approval
+
+    def consume_approval(approval, selection):
+        with approval_lock:
+            issued = approvals.get(approval)
+            if not issued or issued[0] <= monotonic() or issued[1] != selection:
+                raise ValueError("Open the local upgrade review again and choose one of its displayed plans.")
+            del approvals[approval]
+
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
             if self.headers.get("Host") != f"127.0.0.1:{server.server_port}":
@@ -93,6 +118,16 @@ def serve(db, port):
                 return
             try:
                 parts = urlsplit(self.path).path.strip("/").split("/")
+                if parts == ["api", "upgrade-options"]:
+                    self.body_length(0)
+                    params = parse_qs(urlsplit(self.path).query, max_num_fields=3)
+                    candidate = params.get("candidate", [None])[0]
+                    original = int(params.get("original", [0])[0])
+                    plans = keep_both.review_plans(db, candidate, original,
+                                                  refresh=params.get("refresh") == ["1"])
+                    issue_approvals(candidate, original, plans)
+                    self.reply_json(plans)
+                    return
                 if parts == ["api", "replacement-preference"]:
                     self.body_length(0)
                     params = parse_qs(urlsplit(self.path).query, max_num_fields=1)
@@ -101,11 +136,11 @@ def serve(db, port):
                 if parts == ["api", "keep-both"]:
                     self.body_length(0)
                     params = parse_qs(urlsplit(self.path).query, max_num_fields=4)
-                    self.reply_json(keep_both.apply(
-                        db, params.get("candidate", [None])[0],
+                    selection = (params.get("candidate", [None])[0],
                         int(params.get("original", [0])[0]), params.get("token", [None])[0],
-                        params.get("mode", ["keep"])[0],
-                    ))
+                        params.get("mode", ["keep"])[0])
+                    consume_approval(self.headers.get("X-Spliff-Approval"), selection)
+                    self.reply_json(keep_both.apply(db, *selection))
                     return
                 if parts == ["api", "downloads"]:
                     self.body_length(0)

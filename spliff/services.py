@@ -29,7 +29,7 @@ def configuration(project, db, home=None, port=8765):
     tunnel = project / '.venv/bin/tunnel-client'
     profile = project / '.venv/spliff-tunnel/spliff.yaml'
     mcp = shlex.join([str(python), '-m', 'spliff', '--db', str(db), 'mcp',
-                      '--allow-downloads', '--allow-discogs'])
+                      '--allow-downloads', '--allow-discogs', '--dashboard-port', str(port)])
     if ',' in mcp:
         raise ValueError('The tunnel command cannot use project or catalog paths containing commas.')
     if type(port) is not int or not 1024 <= port <= 65535:

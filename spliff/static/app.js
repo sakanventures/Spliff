@@ -555,20 +555,21 @@ let upgradeOptionsRequest = 0;
 
 function completionText(result) {
   const counts = `${result.upgraded} upgraded · ${result.preserved} originals preserved · ${result.skipped.length} skipped · ${result.failed} failed`;
-  return result.trash_pending ? `${counts}. Originals awaiting Trash are recoverable at ${result.trash_pending}.` : counts;
+  if (result.trash_pending) return `${counts}. Originals awaiting Trash are recoverable at ${result.trash_pending}.`;
+  if (result.recovery_path) return `${counts}. Review the remaining workspace at ${result.recovery_path}.`;
+  return counts;
 }
 
-get('keep-both').addEventListener('click', async () => {
-  if (!keptComparison || keepDialog.open) return;
-  const comparison = keptComparison;
+async function showUpgradeOptions(comparison, refresh = false) {
+  if (!comparison || keepDialog.open) return;
   const request = ++upgradeOptionsRequest;
   const options = get('upgrade-options');
   options.replaceChildren();
   keepStatus.textContent = 'Checking audio and destinations…';
   keepDialog.showModal();
-  const query = new URLSearchParams({...comparison, refresh: refreshUpgradePlans ? '1' : '0'});
+  const query = new URLSearchParams({...comparison, refresh: refresh || refreshUpgradePlans ? '1' : '0'});
   try {
-    const result = await api('/api/upgrade-options?' + query);
+    const result = await action('/api/upgrade-options?' + query);
     if (!keepDialog.open || request !== upgradeOptionsRequest) return;
     refreshUpgradePlans = false;
     keepStatus.textContent = '';
@@ -587,7 +588,8 @@ get('keep-both').addEventListener('click', async () => {
         card.append(element('p', `${plan.preserved.length} originals stay in place · ${plan.skipped.length} downloads skipped`, 'muted'));
       }
       const details = element('details');
-      details.append(element('summary', 'Advanced · exact files and audio review'));
+      details.open = true;
+      details.append(element('summary', 'Exact files and audio review'));
       const files = element('ul');
       for (const file of plan.files) {
         const evidence = file.audio_evidence;
@@ -597,14 +599,23 @@ get('keep-both').addEventListener('click', async () => {
       for (const skipped of plan.skipped) files.append(element('li', `Skipped ${skipped.download}: ${skipped.reason}`));
       details.append(files, element('p', plan.audio_review, 'muted'));
       const button = element('button', label, mode === 'replace' ? 'primary' : '');
-      button.addEventListener('click', () => applyUpgrade(comparison, mode, plan));
+      button.addEventListener('click', event => {
+        if (event.isTrusted) applyUpgrade(comparison, mode, plan);
+      });
       card.append(details, button);
       options.append(card);
     }
   } catch (error) {
     if (request === upgradeOptionsRequest) keepStatus.textContent = error.message;
   }
-});
+}
+
+get('keep-both').addEventListener('click', () => showUpgradeOptions(keptComparison));
+
+const reviewLink = new URLSearchParams(location.search);
+if (reviewLink.has('review_candidate') && reviewLink.has('review_original')) {
+  showUpgradeOptions({candidate: reviewLink.get('review_candidate'), original: reviewLink.get('review_original')}, true);
+}
 
 get('cancel-keep-both').addEventListener('click', () => keepDialog.close());
 keepDialog.addEventListener('close', () => { upgradeOptionsRequest++; });
@@ -618,7 +629,7 @@ async function applyUpgrade(comparison, mode, plan) {
   keepStatus.textContent = 'Verifying and installing upgrades…';
   try {
     const params = new URLSearchParams({...comparison, mode, token: plan.token});
-    const result = await action('/api/keep-both?' + params);
+    const result = await action('/api/keep-both?' + params, '', {'X-Spliff-Approval': plan.approval});
     keepDialog.close();
     await loadDownloads(comparison.candidate);
     notice(completionText(result));

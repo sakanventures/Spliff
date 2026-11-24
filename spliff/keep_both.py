@@ -9,7 +9,7 @@ import stat
 import subprocess
 import sys
 import unicodedata
-from contextlib import ExitStack, closing
+from contextlib import closing, contextmanager
 from pathlib import Path
 
 from .catalog import connect, file_identity, replacement_destination, signature
@@ -22,6 +22,68 @@ from .spectral import analyze_file, compare_measurements
 WORK_DIR = ".spliff-keep-both"
 MP3_FOLDER = "MP3"
 HIDDEN_ARCHIVE = ".spliff-originals"
+TRASH = "/usr/bin/trash"
+DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+
+
+@contextmanager
+def open_directory(path, identities):
+    if not path.is_absolute() or ".." in path.parts:
+        raise ValueError("Upgrade paths must stay inside the reviewed folders.")
+    current = Path(path.anchor)
+    descriptor = os.open(current, DIRECTORY_FLAGS)
+    try:
+        if str(current) in identities and file_identity(os.fstat(descriptor)) != identities[str(current)]:
+            raise ValueError(f"The reviewed folder or volume changed: {current}")
+        for part in path.parts[1:]:
+            child = os.open(part, DIRECTORY_FLAGS, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = child
+            current /= part
+            expected = identities.get(str(current))
+            if expected is not None and file_identity(os.fstat(descriptor)) != expected:
+                raise ValueError(f"The reviewed folder or volume changed: {current}")
+        yield descriptor
+    finally:
+        os.close(descriptor)
+
+
+def remember_directory(path, identities):
+    with open_directory(path, identities) as descriptor:
+        identities[str(path)] = file_identity(os.fstat(descriptor))
+
+
+def create_directory(path, identities):
+    with open_directory(path.parent, identities) as parent:
+        os.mkdir(path.name, mode=0o700, dir_fd=parent)
+        descriptor = os.open(path.name, DIRECTORY_FLAGS, dir_fd=parent)
+        try:
+            identities[str(path)] = file_identity(os.fstat(descriptor))
+        finally:
+            os.close(descriptor)
+        os.fsync(parent)
+
+
+def file_signature(directory, name):
+    info = os.stat(name, dir_fd=directory, follow_symlinks=False)
+    if not stat.S_ISREG(info.st_mode):
+        raise ValueError("An upgrade file is no longer a regular file.")
+    return signature(info)
+
+
+def unlink_verified(path, expected, identities):
+    with open_directory(path.parent, identities) as directory:
+        if file_signature(directory, path.name) != expected:
+            raise ValueError(f"An upgrade file changed before cleanup: {path}")
+        os.unlink(path.name, dir_fd=directory)
+
+
+def remove_empty_directory(path, identities):
+    with open_directory(path.parent, identities) as parent:
+        info = os.stat(path.name, dir_fd=parent, follow_symlinks=False)
+        if not stat.S_ISDIR(info.st_mode) or file_identity(info) != identities[str(path)]:
+            raise ValueError(f"An upgrade folder changed before cleanup: {path}")
+        os.rmdir(path.name, dir_fd=parent)
 
 
 def path_fingerprint(path):
@@ -38,6 +100,8 @@ def get_plan(db, candidate, original, mode="keep"):
         raise ValueError("Choose Keep both or Replace.")
     if sys.platform != "darwin":
         raise ValueError("Keep both currently requires macOS.")
+    selection_parts(candidate)
+    job = staging_root() / candidate
     review = review_download(db, candidate, original, include_sources=True)
     if review["kept_both"]:
         raise ValueError("This album has already been updated from this download.")
@@ -50,9 +114,12 @@ def get_plan(db, candidate, original, mode="keep"):
                    for item in items if item not in matched)
     pairs = []
     root = folder = None
+    identities = {}
     from .artist import release_folder
     with closing(connect(db)) as connection:
         original_mode = replacement_destination(connection) if mode == "replace" else "keep"
+        if original_mode == "trash" and not os.access(TRASH, os.X_OK):
+            raise ValueError("Mac Trash is unavailable. Choose the hidden recovery folder or Keep both.")
         sync_folders = [Path(row["root"]) for row in connection.execute(
             "SELECT root FROM sync_targets WHERE candidate=?", (candidate,))]
         for item in matched:
@@ -68,13 +135,19 @@ def get_plan(db, candidate, original, mode="keep"):
             mp3 = track_root / track["path"]
             if folder is None:
                 root, folder = track_root, track_root / release_folder(track["path"])
-                info = root.stat()
-                if file_identity(info) != (track["root_device"], track["root_inode"]):
-                    raise ValueError("The library folder changed. Scan it again before continuing.")
-            if track_root != root or track_root / release_folder(track["path"]) != folder or not mp3.is_relative_to(root):
+                identities[str(root)] = (track["root_device"], track["root_inode"])
+                remember_directory(folder, identities)
+            if (track_root != root or track_root / release_folder(track["path"]) != folder
+                    or not mp3.is_relative_to(folder) or ".." in mp3.parts):
                 raise ValueError("Select originals from a single album folder.")
 
             staged = Path(item["source"])
+            if (job.is_relative_to(root) or root.is_relative_to(job)
+                    or staged.parent.parent != job or not staged.parent.name.isdigit()
+                    or ".." in staged.parts):
+                raise ValueError("The download must be inside Spliff's separate staging folder.")
+            for directory in (mp3.parent, job, staged.parent):
+                remember_directory(directory, identities)
             mp3_sig = tuple(track[key] for key in ("size", "mtime", "device", "inode"))
             if any(not folder.is_relative_to(selected) or not mp3.is_relative_to(selected)
                    for selected in sync_folders):
@@ -122,6 +195,7 @@ def get_plan(db, candidate, original, mode="keep"):
         archive_path = folder / archive_name
         if archive_path.parent.resolve() != archive_path.parent or not archive_path.parent.is_dir() or archive_path.exists():
             raise ValueError("The originals destination conflicts with an existing file.")
+        remember_directory(archive_path.parent, identities)
     if name_key(WORK_DIR) in names:
         raise ValueError("A previous operation needs attention. Check the album folder before retrying.")
     copies = [pair["flac_sig"][0] for pair in pairs]
@@ -154,7 +228,7 @@ def get_plan(db, candidate, original, mode="keep"):
                  if track["id"] not in installed_ids}
     preserved.update(item["original"]["path"] for item in items
                      if item.get("original") and item["original"]["id"] not in installed_ids)
-    return {"candidate": candidate, "root": str(root), "folder": str(folder),
+    return {"candidate": candidate, "root": str(root), "folder": str(folder), "directories": identities,
             "album": review["comparison"]["album"] or Path(ready[0]["mp3"]).stem,
             "mode": mode, "pairs": ready, "skipped": skipped,
             "edition_evidence": review.get("edition_evidence"),
@@ -208,20 +282,26 @@ def review_plans(db, candidate, original, *, refresh=False):
     return {"options": plans, "blocked": blocked}
 
 
-def move_exclusive(source, destination):
-    # Darwin's RENAME_EXCL fails on an existing destination, including a racing writer.
-    rename = ctypes.CDLL(None, use_errno=True).renamex_np
-    rename.argtypes = (ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint)
+def move_exclusive(source, destination, *, identities, expected):
+    # RENAME_EXCL fails on an existing destination, including a racing writer.
+    rename = ctypes.CDLL(None, use_errno=True).renameatx_np
+    rename.argtypes = (ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint)
     rename.restype = ctypes.c_int
-    if not rename(os.fsencode(source), os.fsencode(destination), 0x00000004):
-        return destination
-    error = ctypes.get_errno()
-    if error not in (errno.ENOTSUP, errno.ENOSYS):
-        raise OSError(error, os.strerror(error), str(destination))
-    # Some Mac exFAT volumes cannot rename exclusively. Reserve the destination
-    # with O_EXCL, then verify the copy before touching the source.
-    copy_then_remove(source, destination)
-    return destination
+    with open_directory(source.parent, identities) as source_dir, \
+            open_directory(destination.parent, identities) as destination_dir:
+        if file_signature(source_dir, source.name) != expected:
+            raise ValueError("An upgrade file changed before moving.")
+        if not rename(source_dir, os.fsencode(source.name), destination_dir,
+                      os.fsencode(destination.name), 0x00000004):
+            if file_signature(destination_dir, destination.name) != expected:
+                raise ValueError("An upgrade file changed during the move.")
+            return expected
+        error = ctypes.get_errno()
+        if error not in (errno.ENOTSUP, errno.ENOSYS):
+            raise OSError(error, os.strerror(error), str(destination))
+        # Some exFAT volumes lack exclusive rename. Use exclusive creation
+        # and verify the copy before touching the source.
+        return copy_then_remove(source_dir, source.name, destination_dir, destination.name, expected)
 
 
 def audio_digest(audio):
@@ -242,51 +322,64 @@ def verified_digest(path, expected):
     return digest
 
 
-def copy_then_remove(source, destination):
-    expected = path_fingerprint(source)
-    descriptor = os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-    with os.fdopen(descriptor, "rb") as original, destination.open("xb+") as copy:
-        identity = os.fstat(copy.fileno())
-        digest = hashlib.sha256()
-        try:
-            if signature(os.fstat(original.fileno())) != expected:
-                raise ValueError("The source file changed before copying.")
-            for block in iter(lambda: original.read(1024 * 1024), b""):
-                digest.update(block)
-                copy.write(block)
-            copy.flush()
-            os.fsync(copy.fileno())
-            copy.seek(0)
-            verified = audio_digest(copy)
-            now = destination.lstat()
-            if (digest.digest() != verified or path_fingerprint(source) != expected
-                    or signature(now) != signature(os.fstat(copy.fileno()))):
-                raise ValueError("The copied audio could not be verified.")
-            source_info = os.fstat(original.fileno())
-            os.utime(destination, ns=(source_info.st_atime_ns, source_info.st_mtime_ns))
-            os.fsync(copy.fileno())
-            source.unlink()
-        except BaseException:
-            current = destination.lstat()
-            if (current.st_dev, current.st_ino) == (identity.st_dev, identity.st_ino):
-                destination.unlink()
-            raise
+def copy_then_remove(source_dir, source, destination_dir, destination, expected):
+    descriptor = os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=source_dir)
+    with os.fdopen(descriptor, "rb") as original:
+        flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+        output = os.open(destination, flags, 0o600, dir_fd=destination_dir)
+        with os.fdopen(output, "wb+") as copy:
+            identity = file_identity(os.fstat(output))
+            digest = hashlib.sha256()
+            try:
+                if signature(os.fstat(descriptor)) != expected:
+                    raise ValueError("The source file changed before copying.")
+                for block in iter(lambda: original.read(1024 * 1024), b""):
+                    digest.update(block)
+                    copy.write(block)
+                copy.flush()
+                copy.seek(0)
+                if digest.digest() != audio_digest(copy) or signature(os.fstat(descriptor)) != expected:
+                    raise ValueError("The copied audio could not be verified.")
+                source_info = os.fstat(descriptor)
+                os.utime(output, ns=(source_info.st_atime_ns, source_info.st_mtime_ns))
+                os.fsync(output)
+                os.fsync(destination_dir)
+                saved = signature(os.fstat(output))
+                if (file_signature(source_dir, source) != expected
+                        or file_signature(destination_dir, destination) != saved):
+                    raise ValueError("An upgrade file changed before removing its duplicate.")
+                os.unlink(source, dir_fd=source_dir)
+            except BaseException:
+                # The original is still present unless removal completed.
+                # Retain the copy if either name changed or the source is missing.
+                if (file_signature(source_dir, source) == expected
+                        and file_signature(destination_dir, destination)[2:] == identity):
+                    os.unlink(destination, dir_fd=destination_dir)
+                raise
+            return saved
 
 
-def copy_verified(source, destination, expected):
-    descriptor = os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-    with os.fdopen(descriptor, "rb") as audio, destination.open("xb") as copy:
-        if signature(os.fstat(audio.fileno())) != expected:
-            raise ValueError("A staged file changed. Review the download again.")
-        digest = hashlib.sha256()
-        for block in iter(lambda: audio.read(1024 * 1024), b""):
-            digest.update(block)
-            copy.write(block)
-        copy.flush()
-        os.fsync(copy.fileno())
-        if os.fstat(copy.fileno()).st_size != expected[0] or signature(os.fstat(audio.fileno())) != expected:
-            raise ValueError("A staged file changed while copying.")
-        return digest.digest()
+def copy_verified(source, destination, expected, identities):
+    with open_directory(source.parent, identities) as source_dir, \
+            open_directory(destination.parent, identities) as destination_dir:
+        descriptor = os.open(source.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+                             dir_fd=source_dir)
+        with os.fdopen(descriptor, "rb") as audio:
+            if signature(os.fstat(descriptor)) != expected:
+                raise ValueError("A staged file changed. Review the download again.")
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+            output = os.open(destination.name, flags, 0o600, dir_fd=destination_dir)
+            with os.fdopen(output, "wb") as copy:
+                digest = hashlib.sha256()
+                for block in iter(lambda: audio.read(1024 * 1024), b""):
+                    digest.update(block)
+                    copy.write(block)
+                copy.flush()
+                os.fsync(output)
+                saved = signature(os.fstat(output))
+                if saved[0] != expected[0] or signature(os.fstat(descriptor)) != expected:
+                    raise ValueError("A staged file changed while copying.")
+            return digest.digest(), saved
 
 
 def verify_published(path, expected, digest):
@@ -299,45 +392,54 @@ def verify_published(path, expected, digest):
 
 def remove_staged_copies(plan, published):
     removed = 0
-    try:
-        selection_parts(plan["candidate"])
-        job = staging_root() / plan["candidate"]
-        root = Path(plan["root"])
-        if job.is_relative_to(root) or root.is_relative_to(job) or job.resolve(strict=True) != job:
-            return removed
-        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
-        with ExitStack() as directories:
-            job_fd = os.open(job, flags)
-            directories.callback(os.close, job_fd)
-            entries = []
-            for pair, (final, final_sig) in zip(plan["pairs"], published):
-                source = Path(pair["flac"])
-                if source.parent.parent != job or not source.parent.name.isdigit():
-                    return removed
-                directory = os.open(source.parent.name, flags, dir_fd=job_fd)
-                directories.callback(os.close, directory)
-                if signature(os.stat(source.name, dir_fd=directory, follow_symlinks=False)) != pair["flac_sig"]:
-                    return removed
-                entries.append((directory, source.name, pair["flac_sig"], final, final_sig))
-            for directory, name, source_sig, final, final_sig in entries:
-                if (path_fingerprint(final) != final_sig
-                        or signature(os.stat(name, dir_fd=directory, follow_symlinks=False)) != source_sig):
-                    break
-                os.unlink(name, dir_fd=directory)
-                removed += 1
-    except (OSError, ValueError):
-        # The album is already committed. Leave the remaining duplicates for recovery.
-        pass
+    for pair, (final, final_sig) in zip(plan["pairs"], published):
+        try:
+            if path_fingerprint(final) != final_sig:
+                break
+            unlink_verified(Path(pair["flac"]), pair["flac_sig"], plan["directories"])
+            removed += 1
+        except (OSError, ValueError):
+            # The album is already committed. Leave the remaining duplicates.
+            break
     return removed
 
 
-def clean_work(folder):
-    def ignore_gone(_operation, _path, failure):
-        # macOS can remove an exFAT AppleDouble sidecar with its primary file.
-        if not isinstance(failure[1], FileNotFoundError):
-            raise failure[1]
+def clean_work(work, identities, directories, copies, journal_sig):
+    for path, fingerprint in copies.items():
+        unlink_verified(path, fingerprint, identities)
+    for path in sorted(directories, key=lambda path: len(path.parts), reverse=True):
+        remove_empty_directory(path, identities)
+    with open_directory(work, identities) as directory:
+        if journal_sig is None or set(os.listdir(directory)) != {"plan.json"}:
+            raise ValueError("The recovery folder needs inspection.")
+    unlink_verified(work / "plan.json", journal_sig, identities)
+    remove_empty_directory(work, identities)
 
-    shutil.rmtree(folder, onerror=ignore_gone)
+
+def write_recovery_plan(work, archive, plan, identities):
+    folder = Path(plan["folder"])
+    manifest = {**plan, "original_recovery_folder": str(archive), "pairs": [
+        {**pair, "installed": str(folder / pair["relative"]),
+         "recovery": str(archive / Path(pair["mp3"]).relative_to(folder))}
+        for pair in plan["pairs"]
+    ]}
+    with open_directory(work, identities) as directory:
+        output = os.open("plan.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                         0o600, dir_fd=directory)
+        with os.fdopen(output, "w", encoding="utf-8") as journal:
+            json.dump(manifest, journal, indent=2)
+            journal.flush()
+            os.fsync(output)
+            fingerprint = signature(os.fstat(output))
+        os.fsync(directory)
+    return fingerprint
+
+
+def ensure_upgrade_directory(path, base, identities, created):
+    for directory in reversed((path, *path.parents)):
+        if directory.is_relative_to(base) and directory not in created:
+            create_directory(directory, identities)
+            created.add(directory)
 
 
 def apply(db, candidate, original, token, mode="keep"):
@@ -351,8 +453,11 @@ def apply(db, candidate, original, token, mode="keep"):
     work = folder / WORK_DIR
     original_mode = plan["original_mode"]
     archive = work / MP3_FOLDER if original_mode == "trash" else Path(plan["original_destination"])
+    identities = dict(plan["directories"])
     moved, published = [], []
-    archive_created = False
+    work_dirs, archive_dirs = set(), set()
+    copies = {}
+    journal_sig = None
     with closing(connect(db)) as connection:
         connection.execute("BEGIN IMMEDIATE")
         if mode == "replace" and replacement_destination(connection) != original_mode:
@@ -363,22 +468,24 @@ def apply(db, candidate, original, token, mode="keep"):
             ).fetchone()
             if not row or tuple(row) != (str(root), str(Path(pair["mp3"]).relative_to(root)), 0, pair["codec"], 1, None):
                 raise ValueError("An original changed in the library. Review the destination again.")
-        work.mkdir(mode=0o700)
+        create_directory(work, identities)
         try:
-            (work / "plan.json").write_text(json.dumps(plan, indent=2), encoding="utf-8")
+            journal_sig = write_recovery_plan(work, archive, plan, identities)
             digests = []
             for pair in plan["pairs"]:
                 temporary = work / "audio" / pair["relative"]
-                temporary.parent.mkdir(parents=True, exist_ok=True)
-                digest = copy_verified(Path(pair["flac"]), temporary, pair["flac_sig"])
+                ensure_upgrade_directory(temporary.parent, work / "audio", identities, work_dirs)
+                digest, copies[temporary] = copy_verified(
+                    Path(pair["flac"]), temporary, pair["flac_sig"], identities)
                 if digest.hex() != pair["download_digest"]:
                     raise ValueError("The downloaded audio changed after review.")
                 digests.append(digest)
             for pair, digest in zip(plan["pairs"], digests):
                 temporary = work / "audio" / pair["relative"]
                 final = folder / pair["relative"]
-                move_exclusive(temporary, final)
-                fingerprint = path_fingerprint(final)
+                fingerprint = move_exclusive(temporary, final, identities=identities,
+                                             expected=copies[temporary])
+                del copies[temporary]
                 published.append((final, fingerprint))
                 verify_published(final, fingerprint, digest)
                 columns = ("root", "path", *AUDIO_FIELDS, "size", "mtime", "device", "inode")
@@ -387,21 +494,26 @@ def apply(db, candidate, original, token, mode="keep"):
                     (str(root), str(final.relative_to(root)),
                      *(pair["audio"].get(key) for key in AUDIO_FIELDS), *fingerprint),
                 )
-            archive.mkdir()
-            archive_created = True
-            for pair in plan["pairs"]:
+            for pair, (final, final_sig) in zip(plan["pairs"], published):
+                if path_fingerprint(final) != final_sig:
+                    raise ValueError("An installed lossless file changed before archiving its original.")
                 source = Path(pair["mp3"])
                 if verified_digest(source, pair["mp3_sig"]) != pair["original_digest"]:
                     raise ValueError("An original changed during the operation.")
                 saved = archive / source.relative_to(folder)
-                saved.parent.mkdir(parents=True, exist_ok=True)
-                move_exclusive(source, saved)
-                saved_sig = path_fingerprint(saved)
+                ensure_upgrade_directory(saved.parent, archive, identities, archive_dirs)
+                saved_sig = move_exclusive(source, saved, identities=identities,
+                                           expected=pair["mp3_sig"])
                 moved.append((source, saved, saved_sig))
                 connection.execute(
                     "UPDATE tracks SET path=?,size=?,mtime=?,device=?,inode=?,present=? WHERE id=?",
                     (str(saved.relative_to(root)), *saved_sig, int(mode == "keep"), pair["id"]),
                 )
+            changed_dirs = {path.parent for source, saved, _ in moved for path in (source, saved)}
+            changed_dirs.update(directory.parent for directory in archive_dirs)
+            for directory in sorted(changed_dirs):
+                with open_directory(directory, identities) as descriptor:
+                    os.fsync(descriptor)
             connection.execute("INSERT INTO kept_albums(candidate,destination,mode) VALUES (?,?,?)",
                                (candidate, str(folder), mode))
             result = {"destination": str(folder), "archive": plan["original_destination"],
@@ -409,48 +521,64 @@ def apply(db, candidate, original, token, mode="keep"):
                       "preserved": len(plan["preserved"]) + (len(plan["pairs"]) if mode == "keep" else 0),
                       "skipped": plan["skipped"], "failed": 0,
                       "trash_pending": str(archive) if original_mode == "trash" else None,
-                      "staging_removed": 0, "work_cleanup_pending": True}
+                      "staging_removed": 0, "work_cleanup_pending": True, "recovery_path": str(work)}
             connection.execute("INSERT INTO upgrade_results VALUES (?,?)", (candidate, json.dumps(result)))
             connection.commit()
         except BaseException:
+            if not connection.in_transaction:
+                raise ValueError(f"Check the recovery plan in {work} before retrying.")
             connection.rollback()
             try:
-                for final, fingerprint in reversed(published):
-                    if path_fingerprint(final) == fingerprint:
-                        final.unlink()
-                    else:
-                        raise ValueError("A copied FLAC changed before rollback.")
                 for source, saved, fingerprint in reversed(moved):
-                    if path_fingerprint(saved) != fingerprint:
-                        raise ValueError("An archived MP3 changed before rollback.")
-                    move_exclusive(saved, source)
-                if archive_created:
-                    for directory, _, _ in os.walk(archive, topdown=False):
-                        Path(directory).rmdir()
+                    move_exclusive(saved, source, identities=identities, expected=fingerprint)
+                for final, fingerprint in reversed(published):
+                    unlink_verified(final, fingerprint, identities)
+                for directory in sorted(archive_dirs, key=lambda path: len(path.parts), reverse=True):
+                    remove_empty_directory(directory, identities)
+                clean_work(work, identities, work_dirs, copies, journal_sig)
             except (OSError, ValueError) as exc:
-                raise ValueError(f"Keep both stopped. Check the recovery plan in {work} before retrying.") from exc
-            clean_work(work)
+                raise ValueError(f"The upgrade stopped. Check the recovery plan in {work} before retrying.") from exc
             raise
     trash_pending = None
     if original_mode == "trash":
         try:
-            subprocess.run(["/usr/bin/trash", str(archive)], check=True, capture_output=True, timeout=30)
-        except (OSError, subprocess.SubprocessError):
-            trash_pending = str(archive) if archive.exists() else None
+            trash_originals(moved, published, identities)
+        except (OSError, ValueError, subprocess.SubprocessError):
+            trash_pending = str(archive)
+    staging_removed = 0
+    if not trash_pending:
+        staging_removed = remove_staged_copies(plan, published)
+    work_cleanup_pending = True
+    if not trash_pending:
+        try:
+            if original_mode == "trash":
+                work_dirs.update(archive_dirs)
+            clean_work(work, identities, work_dirs, copies, journal_sig)
+        except (OSError, ValueError):
+            pass
         else:
-            if archive.exists():
-                trash_pending = str(archive)
-    staging_removed = remove_staged_copies(plan, published)
-    try:
-        if not trash_pending:
-            clean_work(work)
-    except OSError:
-        work_cleanup_pending = True
-    else:
-        work_cleanup_pending = bool(trash_pending)
+            work_cleanup_pending = False
     result.update(trash_pending=trash_pending, staging_removed=staging_removed,
-                  work_cleanup_pending=work_cleanup_pending, failed=int(bool(trash_pending)))
+                  work_cleanup_pending=work_cleanup_pending, failed=int(bool(trash_pending)),
+                  recovery_path=str(work) if work_cleanup_pending else None)
     with closing(connect(db)) as connection, connection:
         connection.execute("UPDATE upgrade_results SET result=? WHERE candidate=?",
                            (json.dumps(result), candidate))
     return result
+
+
+def trash_originals(moved, published, identities):
+    for (_, saved, saved_sig), (final, final_sig) in zip(moved, published):
+        if path_fingerprint(final) != final_sig:
+            raise ValueError("The installed lossless file changed before moving its original to Trash.")
+        # Trash accepts paths. Revalidate the private recovery directory and
+        # pass one verified regular file at a time.
+        with open_directory(saved.parent, identities) as directory:
+            if file_signature(directory, saved.name) != saved_sig:
+                raise ValueError("An original changed before moving to Trash.")
+            subprocess.run([TRASH, str(saved)], check=True, capture_output=True, timeout=30)
+            try:
+                os.stat(saved.name, dir_fd=directory, follow_symlinks=False)
+            except FileNotFoundError:
+                continue
+            raise ValueError("An original is still in the recovery folder.")

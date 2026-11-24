@@ -41,6 +41,8 @@ def main():
                             help="Expose folder sync, downloads and upgrade review")
     mcp_parser.add_argument("--allow-discogs", action="store_true",
                             help="Expose read-only Discogs release lookups")
+    mcp_parser.add_argument("--dashboard-port", type=int, default=8765,
+                            help="Port of the local dashboard used for upgrade approval")
     installer = commands.add_parser("install-nicotine-plugin", help="Install Spliff Search for Nicotine+")
     installer.add_argument("--upgrade", action="store_true", help="Update an existing Spliff Search plugin")
     installer.add_argument("--plugins-dir", type=Path,
@@ -96,7 +98,7 @@ def main():
             print(json.dumps(operation(db, args.artist, args.after, args.limit)))
         elif args.command == "mcp":
             mcp.serve(db, search_only=args.search_only, allow_downloads=args.allow_downloads,
-                      allow_discogs=args.allow_discogs)
+                      allow_discogs=args.allow_discogs, dashboard_port=args.dashboard_port)
         elif args.command == "stage":
             print(f"Staged review #{stage(db, args.id, args.candidate.expanduser())}")
         else:

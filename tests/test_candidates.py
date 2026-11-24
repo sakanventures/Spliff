@@ -38,24 +38,24 @@ class CandidateReceipts(unittest.TestCase):
         request.assert_not_called()
         self.assertEqual(result['status'], 'requires_selection')
 
-    def test_apply_requires_an_explicit_choice_of_reviewed_plan(self):
-        with patch.object(mcp.keep_both, 'apply') as apply:
-            with self.assertRaisesRegex(ValueError, 'explicit Keep both or Replace choice'):
-                mcp.confirm_album_action(self.db, self.id, 1, 'replace', 'token')
-            apply.assert_not_called()
-            mcp.confirm_album_action(self.db, self.id, 1, 'replace', 'token', confirmed=True)
-            apply.assert_called_once_with(self.db, self.id, 1, 'token', 'replace')
-
-    def test_download_tools_registered_and_confirmation_is_a_write(self):
-        incoming = [{'jsonrpc':'2.0','id':1,'method':'initialize','params':{'protocolVersion':'2025-11-25'}},
-                    {'jsonrpc':'2.0','id':2,'method':'tools/list'}]
+    def test_download_tools_cannot_apply_even_with_a_confirmed_flag(self):
+        incoming = [
+            {'jsonrpc': '2.0', 'id': 1, 'method': 'initialize',
+             'params': {'protocolVersion': '2025-11-25'}},
+            {'jsonrpc': '2.0', 'id': 2, 'method': 'tools/list'},
+            {'jsonrpc': '2.0', 'id': 3, 'method': 'tools/call',
+             'params': {'name': 'confirm_album_action', 'arguments': {
+                 'candidate_id': self.id, 'original_track_id': 1,
+                 'mode': 'replace', 'token': 'token', 'confirmed': True}}},
+        ]
         output = io.StringIO()
         with patch('sys.stdin',io.StringIO('\n'.join(map(json.dumps,incoming)))), redirect_stdout(output):
             mcp.serve(self.db, allow_downloads=True)
         tools = {t['name']:t for t in json.loads(output.getvalue().splitlines()[1])['result']['tools']}
         for name in ['stage_nicotine_download','nicotine_transfer_status','refresh_nicotine_candidate',
-                     'analyze_download_spectrum','preview_album_action','confirm_album_action',
+                     'analyze_download_spectrum','preview_album_action',
                      'sync_music_folder','music_sync_status','list_nicotine_transfers']:
             self.assertIn(name, tools)
-        self.assertFalse(tools['confirm_album_action']['annotations']['readOnlyHint'])
+        self.assertNotIn('confirm_album_action', tools)
+        self.assertEqual(json.loads(output.getvalue().splitlines()[2])['error']['code'], -32602)
         self.assertFalse(tools['preview_album_action']['annotations']['readOnlyHint'])
