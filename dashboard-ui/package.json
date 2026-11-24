@@ -1,0 +1,20 @@
+{
+  "name": "spliff-dashboard-ui",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node --import tsx generate.tsx",
+    "check": "node --import tsx generate.tsx --check"
+  },
+  "devDependencies": {
+    "@radix-ui/react-slot": "1.5.0",
+    "@tailwindcss/cli": "4.3.5",
+    "class-variance-authority": "0.7.1",
+    "clsx": "2.1.1",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "tailwind-merge": "3.7.1",
+    "tailwindcss": "4.3.5",
+    "tsx": "4.23.15"
+  }
+}

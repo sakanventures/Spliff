@@ -1,4 +1,5 @@
 if (new URLSearchParams(location.search).get('embedded') === '1') document.documentElement.classList.add('embedded');
+const filePreview = location.protocol === 'file:';
 const get = id => document.getElementById(id);
 const element = (tag, content, className) => {
   const node = document.createElement(tag);
@@ -8,6 +9,7 @@ const element = (tag, content, className) => {
 };
 
 async function api(url, options) {
+  if (filePreview) throw new Error('Open the local dashboard to connect to your library.');
   const response = await fetch(url, options);
   const data = await response.json();
   if (!response.ok) throw new Error(data.error || 'Catalog unavailable');
@@ -816,6 +818,10 @@ function updatePickerButtons() {
 }
 
 async function scanMusic() {
+  if (filePreview) {
+    location.assign(get('file-preview').querySelector('a').href);
+    return;
+  }
   if (companion) {
     window.webkit.messageHandlers.spliffMac.postMessage('chooseMusic');
     return;
@@ -876,6 +882,7 @@ get('scan-dismiss').addEventListener('click', () => {
 let syncTimer;
 let syncRequest = 0;
 async function loadSync() {
+  if (filePreview) return;
   const request = ++syncRequest;
   clearTimeout(syncTimer);
   try {
@@ -885,9 +892,17 @@ async function loadSync() {
     for (const item of items) counts[item.current_state] = (counts[item.current_state] || 0) + 1;
     const labels = {queued: 'Searching', candidate_ready: 'Awaiting selection', downloading: 'Downloading', queueing: 'Starting', reviewing: 'Reviewing audio', reviewed: 'Reviewed',
       applied: 'Applied', no_candidate: 'No offer', search_failed: 'Search failed', queue_uncertain: 'Transfer needs attention'};
-    get('sync-status').textContent = Object.entries(counts).map(([key, count]) => `${labels[key]} · ${count}`).join('   ')
+    const status = Object.entries(counts).map(([key, count]) => `${labels[key]} · ${count}`).join('   ')
       || (folders.length && !lastScan?.current ? 'No eligible upgrades in the selected folders.' : '');
-    get('sync-folder-list').hidden = !folders.length;
+    const statusLine = get('sync-status');
+    if (statusLine.textContent !== status) statusLine.textContent = status;
+    statusLine.hidden = !status;
+    const folderLabel = get('sync-folder-state');
+    const folderCount = folders.length
+      ? `${folders.length} ${folders.length === 1 ? 'folder' : 'folders'} selected`
+      : 'No folders selected';
+    if (folderLabel.textContent !== folderCount) folderLabel.textContent = folderCount;
+    get('sync-folders').hidden = !folders.length;
     get('sync-folders').replaceChildren(...folders.map(folder => {
       const row = element('li');
       row.append(element('strong', folder.split('/').filter(Boolean).pop() || folder),
@@ -895,10 +910,11 @@ async function loadSync() {
       return row;
     }));
     get('sync-details').hidden = !items.length;
-    get('sync-downloads').hidden = !folders.length;
     get('sync-items').replaceChildren(...items.map(item => element('li', [item.query, labels[item.current_state], item.detail].filter(Boolean).join(' · '))));
   } catch (error) {
+    get('sync-folder-state').textContent = 'Catalog unavailable';
     get('sync-status').textContent = error.message;
+    get('sync-status').hidden = false;
   } finally {
     if (request === syncRequest && document.body.dataset.view === 'sync') syncTimer = setTimeout(loadSync, 5000);
   }
@@ -917,8 +933,16 @@ if (companion) {
 }
 get('download-comparison-control').append(get('choose-original'));
 view('sync');
-loadScanProgress();
-setInterval(loadScanProgress, 1000);
+if (filePreview) {
+  document.documentElement.classList.add('file-preview');
+  get('workspace-location').textContent = 'File preview';
+  get('file-preview').hidden = false;
+  get('sync-folder').textContent = 'Open local dashboard';
+  get('sync-folder-state').textContent = 'Live dashboard required';
+} else {
+  loadScanProgress();
+  setInterval(loadScanProgress, 1000);
+}
 
 // One graph, one track selector, one source switch. Analysis stays on this Mac.
 function spectrumViewer(container, choices, parameters) {

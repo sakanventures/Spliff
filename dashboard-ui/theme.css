@@ -1,0 +1,21 @@
+@layer theme, utilities;
+@import "tailwindcss/theme.css" layer(theme);
+@import "tailwindcss/utilities.css" layer(utilities) source(none);
+
+@source "./sections.tsx";
+@source "./components";
+
+@theme inline {
+  --color-background: var(--dashboard-background);
+  --color-card: var(--panel);
+  --color-card-foreground: var(--dashboard-foreground);
+  --color-primary: var(--accent);
+  --color-primary-foreground: var(--dashboard-on-accent);
+  --color-secondary: var(--dashboard-surface);
+  --color-secondary-foreground: var(--dashboard-foreground);
+  --color-accent: var(--dashboard-surface);
+  --color-accent-foreground: var(--dashboard-foreground);
+  --color-muted-foreground: var(--muted);
+  --color-destructive: var(--dashboard-destructive);
+  --color-ring: var(--accent);
+}
