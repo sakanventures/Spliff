@@ -26,36 +26,12 @@ export function Navigation() {
   )
 }
 
-const folderPixels = [
-  "........................",
-  "........................",
-  "...#######..............",
-  "...#+++++##.............",
-  "...#++++++###########...",
-  "...#++++++++++++++++#...",
-  "...##################...",
-  "...#++++++++++++++++#...",
-  "...#+++++++**+++++++#...",
-  "...#+++++++**+++++++#...",
-  "...#++++*++**++*++++#...",
-  "...#+++++*+**+*+++++#...",
-  "...#++++++****++++++#...",
-  "...#+++++++**+++++++#...",
-  "...#++++++++++++++++#...",
-  "...##################...",
-  "........................",
-  "........................",
-]
-
-function TransferIllustration() {
+function RecordIllustration() {
   return (
-    <div className="transfer-illustration" aria-hidden="true">
-      <div className="transfer-grid">
-        <div className="transfer-pixels">
-          {folderPixels.flatMap((row, y) => [...row].map((pixel, x) => (
-            <span key={y * 24 + x} data-pixel={pixel === "." ? undefined : pixel} />
-          )))}
-        </div>
+    <div className="record-illustration" aria-hidden="true">
+      <div className="record-artwork">
+        <div className="vinyl-disc" />
+        <div className="record-sleeve"><span className="spliff-mark" /></div>
       </div>
     </div>
   )
@@ -76,7 +52,7 @@ export function SyncWorkspace() {
             <Button id="sync-downloads" type="button" size="lg" variant="outline">View downloads</Button>
           </div>
         </CardContent>
-        <TransferIllustration />
+        <RecordIllustration />
       </Card>
       <section id="sync-folder-list" aria-labelledby="sync-folders-heading">
         <Card className="sync-library">

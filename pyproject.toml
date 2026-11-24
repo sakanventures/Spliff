@@ -18,5 +18,5 @@ spliff = "spliff.__main__:main"
 packages = ["spliff", "spliff.nicotine_bridge"]
 
 [tool.setuptools.package-data]
-spliff = ["static/*.html", "static/*.css", "static/*.js"]
+spliff = ["static/*.html", "static/*.css", "static/*.js", "static/fonts/*.woff2", "static/fonts/*-OFL.txt"]
 "spliff.nicotine_bridge" = ["PLUGININFO"]

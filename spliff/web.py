@@ -24,6 +24,11 @@ MAX_CANDIDATE_BYTES = 512 * 1024 * 1024
 STATIC = Path(__file__).with_name("static")
 ASSETS = {"/": ("index.html", "text/html"), "/app.css": ("app.css", "text/css"),
           "/app.js": ("app.js", "text/javascript")}
+ASSETS.update({
+    f"/fonts/poppins-{subset}-{weight}.woff2": (f"fonts/poppins-{subset}-{weight}.woff2", "font/woff2")
+    for subset in ("latin", "latin-ext")
+    for weight in (400, 500, 600, 700)
+})
 
 def serve(db, port):
     scan_lock = Lock()

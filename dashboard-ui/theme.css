@@ -13,8 +13,8 @@
   --color-primary-foreground: var(--dashboard-on-accent);
   --color-secondary: var(--dashboard-surface);
   --color-secondary-foreground: var(--dashboard-foreground);
-  --color-accent: var(--dashboard-surface);
-  --color-accent-foreground: var(--dashboard-foreground);
+  --color-accent: var(--selection);
+  --color-accent-foreground: var(--selection-ink);
   --color-muted-foreground: var(--muted);
   --color-destructive: var(--dashboard-destructive);
   --color-ring: var(--accent);

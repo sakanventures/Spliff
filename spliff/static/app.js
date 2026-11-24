@@ -608,7 +608,7 @@ async function showUpgradeOptions(comparison, refresh = false) {
       }
       for (const skipped of plan.skipped) files.append(element('li', `Skipped ${skipped.download}: ${skipped.reason}`));
       details.append(files, element('p', plan.audio_review, 'muted'));
-      const button = element('button', label, mode === 'replace' ? 'primary' : '');
+      const button = element('button', label);
       button.addEventListener('click', event => {
         if (event.isTrusted) applyUpgrade(comparison, mode, plan);
       });
