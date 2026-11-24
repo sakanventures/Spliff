@@ -24,6 +24,7 @@ MP3_FOLDER = "MP3"
 HIDDEN_ARCHIVE = ".spliff-originals"
 TRASH = "/usr/bin/trash"
 DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+RECEIPT_NAME = "job.json"
 
 
 @contextmanager
@@ -93,6 +94,26 @@ def path_fingerprint(path):
     if not stat.S_ISREG(info.st_mode):
         raise ValueError("An audio file is no longer a regular file.")
     return signature(info)
+
+
+def staging_receipt_signature(job, pairs, identities):
+    expected = {Path(pair["flac"]).parent.name: pair["flac_sig"][0] for pair in pairs}
+    try:
+        with open_directory(job, identities) as directory:
+            descriptor = os.open(RECEIPT_NAME, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+            with os.fdopen(descriptor, "rb") as receipt:
+                info = os.fstat(descriptor)
+                if not stat.S_ISREG(info.st_mode) or info.st_size > 1024 * 1024:
+                    return None
+                fingerprint = signature(info)
+                data = json.loads(receipt.read(1024 * 1024 + 1))
+            entries = data["entries"]
+            if (data["id"] == job.name and len(entries) == len(pairs)
+                    and {entry["directory"]: entry["bytes"] for entry in entries} == expected
+                    and file_signature(directory, RECEIPT_NAME) == fingerprint):
+                return fingerprint
+    except (OSError, ValueError, KeyError, TypeError):
+        pass
 
 
 def get_plan(db, candidate, original, mode="keep"):
@@ -223,12 +244,14 @@ def get_plan(db, candidate, original, mode="keep"):
             ready.append(pair)
     if not ready:
         raise ValueError(skipped[-1]["reason"])
+    receipt_signature = staging_receipt_signature(job, ready, identities) if len(ready) == len(items) else None
     installed_ids = {pair["id"] for pair in ready}
     preserved = {track["path"] for track in review["originals_without_match"]
                  if track["id"] not in installed_ids}
     preserved.update(item["original"]["path"] for item in items
                      if item.get("original") and item["original"]["id"] not in installed_ids)
     return {"candidate": candidate, "root": str(root), "folder": str(folder), "directories": identities,
+            "staging": str(job), "receipt_signature": receipt_signature,
             "album": review["comparison"]["album"] or Path(ready[0]["mp3"]).stem,
             "mode": mode, "pairs": ready, "skipped": skipped,
             "edition_evidence": review.get("edition_evidence"),
@@ -391,17 +414,36 @@ def verify_published(path, expected, digest):
 
 
 def remove_staged_copies(plan, published):
+    job = Path(plan["staging"])
+    identities = plan["directories"]
     removed = 0
     for pair, (final, final_sig) in zip(plan["pairs"], published):
+        source = Path(pair["flac"])
         try:
-            if path_fingerprint(final) != final_sig:
-                break
-            unlink_verified(Path(pair["flac"]), pair["flac_sig"], plan["directories"])
-            removed += 1
+            with open_directory(final.parent, identities) as directory:
+                if file_signature(directory, final.name) != final_sig:
+                    continue
+            unlink_verified(source, pair["flac_sig"], identities)
         except (OSError, ValueError):
-            # The album is already committed. Leave the remaining duplicates.
-            break
-    return removed
+            continue
+        removed += 1
+        try:
+            remove_empty_directory(source.parent, identities)
+        except (OSError, ValueError):
+            # Only an empty, reviewed transfer directory can be removed.
+            pass
+    receipt = plan["receipt_signature"]
+    if removed != len(plan["pairs"]) or receipt is None:
+        return removed, False
+    try:
+        with open_directory(job, identities) as directory:
+            if set(os.listdir(directory)) != {RECEIPT_NAME}:
+                return removed, False
+        unlink_verified(job / RECEIPT_NAME, receipt, identities)
+        remove_empty_directory(job, identities)
+    except (OSError, ValueError):
+        return removed, False
+    return removed, True
 
 
 def clean_work(work, identities, directories, copies, journal_sig):
@@ -423,6 +465,10 @@ def write_recovery_plan(work, archive, plan, identities):
          "recovery": str(archive / Path(pair["mp3"]).relative_to(folder))}
         for pair in plan["pairs"]
     ]}
+    return write_journal(work, manifest, identities)
+
+
+def write_journal(work, manifest, identities):
     with open_directory(work, identities) as directory:
         output = os.open("plan.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
                          0o600, dir_fd=directory)
@@ -525,7 +571,8 @@ def apply(db, candidate, original, token, mode="keep"):
                       "preserved": len(plan["preserved"]) + (len(plan["pairs"]) if mode == "keep" else 0),
                       "skipped": plan["skipped"], "failed": 0,
                       "trash_pending": str(archive) if original_mode == "trash" else None,
-                      "staging_removed": 0, "work_cleanup_pending": True, "recovery_path": str(work)}
+                      "staging_removed": 0, "staging_cleared": False, "staging_path": plan["staging"],
+                      "work_cleanup_pending": True, "recovery_path": str(work)}
             connection.execute("INSERT INTO upgrade_results VALUES (?,?)", (candidate, json.dumps(result)))
             connection.commit()
         except BaseException:
@@ -549,9 +596,7 @@ def apply(db, candidate, original, token, mode="keep"):
             trash_originals(moved, published, identities)
         except (OSError, ValueError, subprocess.SubprocessError):
             trash_pending = str(archive)
-    staging_removed = 0
-    if not trash_pending and not any(pair["recording_evidence"] for pair in plan["pairs"]):
-        staging_removed = remove_staged_copies(plan, published)
+    staging_removed, staging_cleared = (0, False) if trash_pending else remove_staged_copies(plan, published)
     work_cleanup_pending = True
     if not trash_pending:
         try:
@@ -563,6 +608,7 @@ def apply(db, candidate, original, token, mode="keep"):
         else:
             work_cleanup_pending = False
     result.update(trash_pending=trash_pending, staging_removed=staging_removed,
+                  staging_cleared=staging_cleared, staging_path=None if staging_cleared else plan["staging"],
                   work_cleanup_pending=work_cleanup_pending, failed=int(bool(trash_pending)),
                   recovery_path=str(work) if work_cleanup_pending else None)
     with closing(connect(db)) as connection, connection:

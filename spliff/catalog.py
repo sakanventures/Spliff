@@ -78,6 +78,23 @@ def replacement_preference(db, destination=None):
             """, (destination,))
         return {"destination": replacement_destination(connection)}
 
+
+def file_metadata_mode(connection):
+    row = connection.execute("SELECT value FROM preferences WHERE key='file_metadata'").fetchone()
+    return row["value"] if row else "preserve"
+
+
+def file_metadata_preference(db, mode=None):
+    if mode is not None and mode not in ("preserve", "write"):
+        raise ValueError("Choose Preserve downloaded files or Write verified music tags.")
+    with closing(connect(db)) as connection, connection:
+        if mode is not None:
+            connection.execute("""
+                INSERT INTO preferences(key,value) VALUES ('file_metadata',?)
+                ON CONFLICT(key) DO UPDATE SET value=excluded.value
+            """, (mode,))
+        return {"mode": file_metadata_mode(connection)}
+
 def initialize(db):
     db.parent.mkdir(parents=True, exist_ok=True)
     with closing(connect(db)) as connection:
@@ -110,7 +127,8 @@ def probe(binary, descriptor, timeout=30):
         [binary, "-v", "error", "-protocol_whitelist", "file", "-format_whitelist",
          "mp3,flac,wav,aiff,mov,aac,ogg,ape,wv,asf,dsf,iff", "-select_streams", "a:0",
          "-show_entries", "stream=codec_name,duration,bit_rate,sample_rate,bits_per_raw_sample,bits_per_sample:"
-         "stream_tags=title,artist,album,track,disc:format=format_name,duration,bit_rate:format_tags=title,artist,album,track,disc",
+         "stream_tags=title,artist,album,album_artist,date,track,disc:"
+         "format=format_name,duration,bit_rate:format_tags=title,artist,album,album_artist,date,track,disc",
          "-of", "json", "-i", f"/dev/fd/{descriptor}"],
         capture_output=True, check=True, timeout=timeout, pass_fds=(descriptor,),
     )
@@ -138,6 +156,7 @@ def probe(binary, descriptor, timeout=30):
         return None
 
     return dict(title=tags.get("title"), artist=tags.get("artist"), album=tags.get("album"),
+                album_artist=tags.get("album_artist"), date=tags.get("date"),
                 track_number=tags.get("track"), disc_number=tags.get("disc"),
                 codec=codec, format=container.get("format_name"), quality=quality,
                 duration=number("duration", float), bitrate=number("bit_rate"),

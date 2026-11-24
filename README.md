@@ -72,7 +72,7 @@ For an existing personal-token setup, Spliff also accepts the `SPLIFF_DISCOGS_TO
 
 ## Stage and review a search candidate
 
-In **Sync**, choose a local music folder. Spliff scans it, schedules searches for owned lossy recordings, stages suitable peer offers through Nicotine+, and reviews completed audio. The local dashboard service advances the queue even when the window is closed. **Downloads** shows queued, downloaded, reviewed and applied transfers. The catalog and private staging receipts retain the transfer IDs, matching originals and review evidence across restarts.
+In **Sync**, choose a local music folder. Spliff scans it, schedules searches for owned lossy recordings, stages suitable peer offers through Nicotine+, and reviews completed audio. The local dashboard service advances the queue even when the window is closed. **Downloads** shows transfers that still have a staging folder. Downloads waiting for a choice remain available across restarts. The catalog retains the transfer ID and outcome after a completed transfer leaves staging.
 
 Open a completed download and choose **Choose upgrade** to see the available plans. **Keep both** retains originals in a visible archive alongside the new files. **Replace** moves upgraded originals to Mac Trash or the hidden recovery folder selected in Settings. The mode button authorizes the displayed plan. Spliff checks the plan and both sets of file hashes before applying it. Changes to the inputs or destinations require a new choice.
 
@@ -90,7 +90,15 @@ For multi-disc releases, the preview groups audio under `Disc 1`, `Disc 2`, and 
 
 For an album with a complete one-to-one FLAC match against unprotected MP3 originals, click **Use FLACs** and choose **Keep both** or **Replace**. Either choice leads to a destination preview and a separate confirmation.
 
-Spliff copies the staged FLACs into the album directory. **Keep both** moves the MP3s into `MP3`, preserving their indexed IDs. **Replace** sends the originals to the Mac Trash by default after Spliff verifies and indexes the FLACs. Choose a hidden recovery folder under **Advanced → Settings**, or ask ChatGPT to change the replacement preference when the MCP download tools are enabled. If the Trash move fails, Spliff reports where the original files are still saved. Once the saved FLACs pass byte-for-byte verification and the catalog update succeeds, Spliff removes the matching audio files from its Nicotine+ staging folder. Existing destinations and protected originals block the operation. If the Mac loses power during the operation, a hidden `.spliff-keep-both` directory in the album folder can contain the recovery plan. Review it before retrying.
+Spliff copies the staged FLACs into the album directory. **Keep both** moves the MP3s into `MP3`, preserving their indexed IDs. **Replace** sends the originals to the Mac Trash by default after Spliff verifies and indexes the FLACs. Choose a hidden recovery folder under **Advanced → Settings**, or ask ChatGPT to change the replacement preference when the MCP download tools are enabled. After either choice succeeds, Spliff removes the verified duplicates from Nicotine+ staging. Once the transfer is fully installed and the staging folder is empty of audio, Spliff removes the staging receipt and folder. Files skipped in the install and unexpected files stay in staging. If the Trash move fails, Spliff keeps the staged audio and reports where the original files are still saved. If the Mac loses power during the operation, a hidden `.spliff-keep-both` directory in the album folder can contain the recovery plan. Review it before retrying.
+
+## Add a first-time download
+
+Ask ChatGPT to download a specific album or track by artist, then select a search result. An indexed original is optional. After the download finishes, use **Add to library** from the review link or the local dashboard. Choose your music library and review the artist, category, edition year, destination folders, and filenames. Spliff reuses a matching artist folder when it can verify the name and creates missing folders after approval. If the album’s first release was after the artist’s death, confirm that when selecting **Posthumous Albums**.
+
+When Discogs is connected and the downloaded tags and tracklist match, the review offers editions with their year, release type, label, and catalog number. Choose the edition you downloaded or supply the filing details yourself. Spliff saves music metadata from the selected edition without saving its links. Under **Settings → File metadata on import**, **Preserve downloaded files** keeps the original bytes and tags. **Write verified music tags (FLAC)** previews and writes the shown FLAC tags while preserving the audio bytes and existing artwork. Use preserve mode for other formats.
+
+Approving **Add to library** verifies and indexes the installed audio before clearing its staged copies. A changed plan or existing destination requires a new review. An interrupted install leaves the staged audio available and can leave a `.spliff-import-…` recovery plan in the selected library.
 
 ## Spectral review
 

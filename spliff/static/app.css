@@ -208,6 +208,10 @@ dialog::backdrop { background: #060906bd; }
 .upgrade-option details { margin-bottom: 10px; }
 .upgrade-option li { margin-bottom: 5px; }
 #keep-both-dialog { max-height: 90vh; overflow: auto; width: min(90vw, 610px); }
+#import-dialog { max-height: 90vh; overflow: auto; width: min(90vw, 650px); }
+#import-details:not([hidden]) { display: grid; gap: 10px; }
+#import-preview { overflow-wrap: anywhere; }
+#import-preview button + button { margin-inline-start: 8px; }
 
 #sync-folder-list { margin-bottom: 22px; }
 #sync-folder-list h2 { font-size: 1rem; margin: 0 0 8px; }

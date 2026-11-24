@@ -3,6 +3,7 @@ import json
 import secrets
 import shutil
 import subprocess
+from contextlib import closing
 from tempfile import TemporaryDirectory
 from threading import Event, Lock, Thread
 from time import monotonic
@@ -11,8 +12,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
 
-from .catalog import albums, replacement_preference, stats, tracks
-from . import keep_both, sync
+from .catalog import albums, connect, file_metadata_preference, replacement_preference, stats, tracks
+from . import keep_both, library_import, sync
 from .nicotine import search
 from .review import protect, reviews, stage
 from .spectral import analyze_track, analyze_download
@@ -29,26 +30,30 @@ def serve(db, port):
     scan_state = None
     approval_lock = Lock()
     approvals = {}
+    import_editions = {}
+    picked_roots = {}
 
-    def issue_approvals(candidate, original, plans):
+    def issue_approval(selection, payload=None):
         now = monotonic()
         with approval_lock:
-            for key, (expiry, _) in list(approvals.items()):
+            for key, (expiry, _, _) in list(approvals.items()):
                 if expiry <= now:
                     del approvals[key]
-            for mode, plan in plans["options"].items():
-                if len(approvals) >= 256:
-                    del approvals[next(iter(approvals))]
-                approval = secrets.token_urlsafe(32)
-                approvals[approval] = (now + 15 * 60, (candidate, original, plan["token"], mode))
-                plan["approval"] = approval
+            if len(approvals) >= 256:
+                del approvals[next(iter(approvals))]
+            approval = secrets.token_urlsafe(32)
+            approvals[approval] = (now + 15 * 60, selection, payload)
+            return approval
 
     def consume_approval(approval, selection):
         with approval_lock:
             issued = approvals.get(approval)
             if not issued or issued[0] <= monotonic() or issued[1] != selection:
+                if selection[0] == "import":
+                    raise ValueError("Review the local import plan again before choosing Add to library.")
                 raise ValueError("Open the local upgrade review again and choose one of its displayed plans.")
             del approvals[approval]
+            return issued[2]
 
     def start_scan(folders):
         nonlocal scan_state
@@ -88,6 +93,8 @@ def serve(db, port):
                     self.reply_json(stats(db))
                 elif url.path == "/api/replacement-preference":
                     self.reply_json(replacement_preference(db))
+                elif url.path == "/api/file-metadata-preference":
+                    self.reply_json(file_metadata_preference(db))
                 elif url.path == "/api/albums":
                     self.reply_json(albums(db, params.get("q", "")))
                 elif url.path == "/api/artist-library":
@@ -150,13 +157,70 @@ def serve(db, port):
                     original = int(params.get("original", [0])[0])
                     plans = keep_both.review_plans(db, candidate, original,
                                                   refresh=params.get("refresh") == ["1"])
-                    issue_approvals(candidate, original, plans)
+                    for mode, plan in plans["options"].items():
+                        plan["approval"] = issue_approval((candidate, original, plan["token"], mode))
                     self.reply_json(plans)
+                    return
+                if parts == ["api", "import-options"]:
+                    self.body_length(0)
+                    params = parse_qs(urlsplit(self.path).query, max_num_fields=1)
+                    candidate = params.get("candidate", [None])[0]
+                    options = library_import.options(db, candidate)
+                    with approval_lock:
+                        if candidate not in import_editions and len(import_editions) >= 32:
+                            del import_editions[next(iter(import_editions))]
+                        import_editions[candidate] = {item["id"]: item for item in options["editions"]}
+                    self.reply_json(options)
+                    return
+                if parts == ["api", "import-root"]:
+                    self.body_length(0)
+                    folders = self.pick_folders(single=True)
+                    if not folders:
+                        self.reply_json({"cancelled": True})
+                        return
+                    root, identity = library_import.root_identity(db, folders[0])
+                    with approval_lock:
+                        picked_roots[root] = identity
+                    self.reply_json({"root": root})
+                    return
+                if parts == ["api", "import-plan"]:
+                    data = json.loads(self.rfile.read(self.body_length(16 * 1024)))
+                    if (not isinstance(data, dict) or not isinstance(data.get("root"), str)
+                            or not isinstance(data.get("candidate"), str)):
+                        raise ValueError("Choose a local music library folder and release details.")
+                    candidate, root = data.get("candidate"), data["root"]
+                    with closing(connect(db)) as connection:
+                        identity = library_import.catalog_roots(connection).get(root)
+                    edition_id = data.get("edition")
+                    with approval_lock:
+                        identity = picked_roots.get(root) or identity
+                        edition = import_editions.get(candidate, {}).get(edition_id) if type(edition_id) is int else None
+                    if not identity:
+                        raise ValueError("Choose the music library folder on your Mac.")
+                    if edition_id is not None and not edition:
+                        raise ValueError("Reopen the import to refresh your Discogs edition choices.")
+                    details = {key: data.get(key) for key in ("artist", "title", "year", "category", "posthumous")}
+                    plan = library_import.prepare(db, candidate, root, identity, details, edition)
+                    preview = library_import.preview(plan)
+                    preview["approval"] = issue_approval(("import", candidate, preview["token"]), plan)
+                    self.reply_json(preview)
+                    return
+                if parts == ["api", "import-apply"]:
+                    self.body_length(0)
+                    params = parse_qs(urlsplit(self.path).query, max_num_fields=2)
+                    selection = ("import", params.get("candidate", [None])[0], params.get("token", [None])[0])
+                    plan = consume_approval(self.headers.get("X-Spliff-Approval"), selection)
+                    self.reply_json(library_import.apply(db, plan))
                     return
                 if parts == ["api", "replacement-preference"]:
                     self.body_length(0)
                     params = parse_qs(urlsplit(self.path).query, max_num_fields=1)
                     self.reply_json(replacement_preference(db, params.get("destination", [""])[0]))
+                    return
+                if parts == ["api", "file-metadata-preference"]:
+                    self.body_length(0)
+                    params = parse_qs(urlsplit(self.path).query, max_num_fields=1)
+                    self.reply_json(file_metadata_preference(db, params.get("mode", [""])[0]))
                     return
                 if parts == ["api", "keep-both"]:
                     self.body_length(0)
@@ -248,15 +312,19 @@ def serve(db, port):
                 review_id = stage(db, track_id, candidate)
             self.reply_json({"id": review_id}, 201)
 
-        def pick_folders(self):
+        def pick_folders(self, single=False):
             picker = shutil.which("osascript")
             if not picker:
                 raise ValueError("The folder picker requires macOS.")
+            choice = (
+                'JSON.stringify([app.chooseFolder({withPrompt: "Choose a music library for Spliff"}).toString()])'
+                if single else
+                'JSON.stringify(app.chooseFolder({withPrompt: "Choose music folders for Spliff", '
+                'multipleSelectionsAllowed: true}).map(path => path.toString()))'
+            )
             result = subprocess.run(
                 [picker, "-l", "JavaScript", "-e",
-                 'const app = Application.currentApplication(); app.includeStandardAdditions = true; '
-                 'JSON.stringify(app.chooseFolder({withPrompt: "Choose music folders for Spliff", '
-                 'multipleSelectionsAllowed: true}).map(path => path.toString()))'],
+                 'const app = Application.currentApplication(); app.includeStandardAdditions = true; ' + choice],
                 capture_output=True, text=True, timeout=300,
             )
             if result.returncode:

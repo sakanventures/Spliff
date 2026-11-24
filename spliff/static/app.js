@@ -345,6 +345,7 @@ function selectDownload(job, open = false) {
     get('download-details').hidden = true;
     get('download-details').open = false;
     get('download-spectrum-details').open = false;
+    get('add-download').hidden = true;
   }
   selectedDownload = job;
   get('download-heading').hidden = false;
@@ -372,7 +373,7 @@ async function loadDownloads(selected, quiet = false) {
       const button = element('button', '', 'download-job');
       button.dataset.job = job.id;
       const title = element('span');
-      const label = {applied: 'Applied', reviewed: 'Reviewed', downloaded: 'Reviewing audio', downloading: 'Downloading'}[job.state];
+      const label = {applied: 'Files remain in staging', reviewed: 'Reviewed', downloaded: 'Reviewing audio', downloading: 'Downloading'}[job.state];
       title.append(element('strong', job.title), element('small', [label, job.total + ' tracks'].filter(Boolean).join(' · ')));
       button.append(title);
       button.append(element('span', 'Open →', 'download-open'));
@@ -440,7 +441,7 @@ function showDownload(result, job) {
   get('download-title').textContent = candidateAlbum || job.title;
   get('download-comparison').hidden = result.complete !== review.length;
   const kept = result.kept_both;
-  get('download-original').textContent = kept ? (kept.mode === 'replace' ? 'FLACs in use' : 'Both versions saved') :
+  get('download-original').textContent = kept ? ({replace: 'FLACs in use', keep: 'Both versions saved', import: 'Added to library'}[kept.mode]) :
     result.comparison?.album || downloadOriginal?.title || 'No album selected';
   get('choose-original').textContent = companion && result.comparison?.album ?
     'Change album' : 'Choose comparison album';
@@ -451,6 +452,8 @@ function showDownload(result, job) {
       item.audio?.quality === 'lossless' &&
       item.original?.quality === 'lossy' && !item.original.protected);
   get('keep-both').hidden = !eligible;
+  get('add-download').hidden = Boolean(kept) || eligible || !review.length || result.complete !== review.length ||
+    !review.every(item => item.audio?.quality === 'lossless');
   get('keep-both').textContent = 'Choose upgrade';
   keptComparison = eligible ? {candidate: job.id, original: result.comparison.original_track_id} : null;
   const edition = result.edition_evidence;
@@ -460,9 +463,7 @@ function showDownload(result, job) {
   if (edition) {
     editionNote.append(edition.status);
     for (const release of edition.releases) {
-      const anchor = element('a', `${release.title} (${release.year || 'year unknown'})`);
-      anchor.href = release.url;
-      editionNote.append(' · ', anchor);
+      editionNote.append(` · ${release.title} (${release.year || 'year unknown'})`);
     }
   }
   const note = get('download-note');
@@ -538,8 +539,12 @@ get('queue-form').addEventListener('submit', async event => {
   try {
     const result = await action('/api/downloads?' + new URLSearchParams({candidate: input.value.trim()}));
     input.value = '';
-    get('queue-status').textContent = 'Sent to Nicotine+. It will appear here when complete.';
-    await loadDownloads(result.id, true);
+    if (result.state === 'applied') {
+      get('queue-status').textContent = 'This transfer was already installed.';
+    } else {
+      get('queue-status').textContent = 'Sent to Nicotine+. It will appear here when complete.';
+      await loadDownloads(result.id, true);
+    }
   } catch (error) {
     get('queue-status').textContent = error.message;
   } finally {
@@ -554,10 +559,13 @@ let refreshUpgradePlans = false;
 let upgradeOptionsRequest = 0;
 
 function completionText(result) {
-  const counts = `${result.upgraded} upgraded · ${result.preserved} originals preserved · ${result.skipped.length} skipped · ${result.failed} failed`;
-  if (result.trash_pending) return `${counts}. Originals awaiting Trash are recoverable at ${result.trash_pending}.`;
-  if (result.recovery_path) return `${counts}. Review the remaining workspace at ${result.recovery_path}.`;
-  return counts;
+  const counts = result.mode === 'import' ? `Added ${result.imported} tracks to ${result.destination}` :
+    `${result.upgraded} upgraded · ${result.preserved} originals preserved · ${result.skipped.length} skipped · ${result.failed} failed`;
+  const staging = result.staging_cleared ? 'Staging cleared.' :
+    result.staging_path ? `Review the files left in staging at ${result.staging_path}.` : '';
+  const recovery = result.trash_pending ? `Originals awaiting Trash are recoverable at ${result.trash_pending}.` :
+    result.recovery_path ? `Review the remaining workspace at ${result.recovery_path}.` : '';
+  return [counts + '.', staging, recovery].filter(Boolean).join(' ');
 }
 
 async function showUpgradeOptions(comparison, refresh = false) {
@@ -631,7 +639,12 @@ async function applyUpgrade(comparison, mode, plan) {
     const params = new URLSearchParams({...comparison, mode, token: plan.token});
     const result = await action('/api/keep-both?' + params, '', {'X-Spliff-Approval': plan.approval});
     keepDialog.close();
-    await loadDownloads(comparison.candidate);
+    if (result.staging_cleared) {
+      showDownloadList();
+      await loadDownloads();
+    } else {
+      await loadDownloads(comparison.candidate);
+    }
     notice(completionText(result));
   } catch (error) {
     refreshUpgradePlans = true;
@@ -667,17 +680,22 @@ get('albums').addEventListener('click', () => showAlbumLibrary());
 const settingsDialog = get('settings-dialog');
 const settingsForm = get('replacement-settings');
 const replacementSelect = get('replace-destination');
+const metadataSelect = get('file-metadata');
 const saveSettings = settingsForm.querySelector('button');
 const settingsStatus = get('settings-status');
 
 get('open-settings').addEventListener('click', async () => {
   settingsDialog.showModal();
   get('advanced').open = false;
-  replacementSelect.disabled = saveSettings.disabled = true;
+  replacementSelect.disabled = metadataSelect.disabled = saveSettings.disabled = true;
   settingsStatus.textContent = 'Loading settings…';
   try {
-    replacementSelect.value = (await api('/api/replacement-preference')).destination;
-    replacementSelect.disabled = saveSettings.disabled = false;
+    const [replacement, metadata] = await Promise.all([
+      api('/api/replacement-preference'), api('/api/file-metadata-preference')
+    ]);
+    replacementSelect.value = replacement.destination;
+    metadataSelect.value = metadata.mode;
+    replacementSelect.disabled = metadataSelect.disabled = saveSettings.disabled = false;
     settingsStatus.textContent = '';
   } catch (error) {
     settingsStatus.textContent = error.message;
@@ -686,14 +704,17 @@ get('open-settings').addEventListener('click', async () => {
 get('close-settings').addEventListener('click', () => settingsDialog.close());
 settingsForm.addEventListener('submit', async event => {
   event.preventDefault();
-  replacementSelect.disabled = saveSettings.disabled = true;
+  replacementSelect.disabled = metadataSelect.disabled = saveSettings.disabled = true;
   try {
-    await action('/api/replacement-preference?' + new URLSearchParams({destination: replacementSelect.value}));
+    await Promise.all([
+      action('/api/replacement-preference?' + new URLSearchParams({destination: replacementSelect.value})),
+      action('/api/file-metadata-preference?' + new URLSearchParams({mode: metadataSelect.value}))
+    ]);
     settingsStatus.textContent = 'Saved.';
   } catch (error) {
     settingsStatus.textContent = error.message;
   } finally {
-    replacementSelect.disabled = saveSettings.disabled = false;
+    replacementSelect.disabled = metadataSelect.disabled = saveSettings.disabled = false;
   }
 });
 function refreshSummary() {
@@ -986,3 +1007,164 @@ function showTrackSpectrum(track) {
   dialog.showModal();
   spectrumViewer(graph, [{title: track.title || track.path.split('/').pop(), id: track.id}], choice => ({track: choice.id}));
 }
+
+const importDialog = get('import-dialog');
+const importForm = get('import-details');
+const importStatus = get('import-status');
+const importPreview = get('import-preview');
+let importCandidate;
+let importEditions = [];
+let importBusy = false;
+
+function importField(name) { return importForm.elements.namedItem(name); }
+
+function option(label, value) {
+  const item = element('option', label);
+  item.value = value;
+  return item;
+}
+
+function updateCategory() {
+  const posthumous = importField('category').value === 'Posthumous Albums';
+  get('import-posthumous-row').hidden = !posthumous;
+  importField('posthumous').required = posthumous;
+  if (!posthumous) importField('posthumous').checked = false;
+}
+
+function selectEdition() {
+  const edition = importEditions.find(item => String(item.id) === importField('edition').value);
+  if (!edition) return;
+  for (const key of ['artist', 'title', 'year', 'category']) {
+    if (edition[key]) importField(key).value = edition[key];
+  }
+  updateCategory();
+}
+
+async function showImport(candidate) {
+  if (!candidate || importDialog.open) return;
+  importCandidate = candidate;
+  importForm.reset();
+  importForm.hidden = importPreview.hidden = true;
+  importStatus.textContent = 'Checking the download and looking up editions…';
+  importDialog.showModal();
+  try {
+    const result = await action('/api/import-options?' + new URLSearchParams({candidate}));
+    if (!importDialog.open || importCandidate !== candidate) return;
+    importField('root').replaceChildren(option('Choose a library', ''),
+      ...result.roots.map(root => option(root, root)));
+    if (result.roots.length === 1) importField('root').value = result.roots[0];
+    importField('category').replaceChildren(option('Choose a category', ''),
+      ...result.categories.map(category => option(category, category)));
+    for (const key of ['artist', 'title', 'year', 'category']) importField(key).value = result.suggested[key];
+    importEditions = result.editions;
+    importField('edition').replaceChildren(option('Use my filing details', ''),
+      ...importEditions.map(edition => option([
+        edition.title, edition.year, edition.country,
+        ...edition.labels.flatMap(label => [label.name, label.catno])
+      ].filter(Boolean).join(' · '), String(edition.id))));
+    get('import-edition-row').hidden = !importEditions.length;
+    if (importEditions.length === 1) {
+      importField('edition').value = String(importEditions[0].id);
+      selectEdition();
+    }
+    updateCategory();
+    importStatus.textContent = '';
+    importForm.hidden = false;
+  } catch (error) {
+    if (importDialog.open && importCandidate === candidate) importStatus.textContent = error.message;
+  }
+}
+
+get('add-download').addEventListener('click', () => showImport(selectedDownload?.id));
+get('import-close').addEventListener('click', () => importDialog.close());
+importDialog.addEventListener('cancel', event => { if (importBusy) event.preventDefault(); });
+importField('edition').addEventListener('change', selectEdition);
+importField('category').addEventListener('change', updateCategory);
+get('import-pick-root').addEventListener('click', async event => {
+  const button = event.currentTarget;
+  button.disabled = true;
+  try {
+    const result = await action('/api/import-root');
+    if (!result.root || !importDialog.open) return;
+    const select = importField('root');
+    if (![...select.options].some(item => item.value === result.root)) select.append(option(result.root, result.root));
+    select.value = result.root;
+    importStatus.textContent = '';
+  } catch (error) {
+    importStatus.textContent = error.message;
+  } finally {
+    button.disabled = false;
+  }
+});
+
+importForm.addEventListener('submit', async event => {
+  event.preventDefault();
+  const submit = event.submitter;
+  const candidate = importCandidate;
+  submit.disabled = true;
+  importStatus.textContent = 'Verifying files and checking destinations…';
+  const data = Object.fromEntries(new FormData(importForm));
+  data.candidate = candidate;
+  data.edition = data.edition ? Number(data.edition) : null;
+  data.posthumous = importField('posthumous').checked;
+  try {
+    const plan = await action('/api/import-plan', JSON.stringify(data), {'Content-Type': 'application/json'});
+    if (!importDialog.open || importCandidate !== candidate) return;
+    showImportPreview(plan);
+  } catch (error) {
+    if (importDialog.open && importCandidate === candidate) importStatus.textContent = error.message;
+  } finally {
+    submit.disabled = false;
+  }
+});
+
+function showImportPreview(plan) {
+  importForm.hidden = true;
+  importPreview.hidden = false;
+  importStatus.textContent = '';
+  const folders = element('ul');
+  for (const folder of plan.new_folders) folders.append(element('li', folder));
+  const files = element('ul');
+  for (const file of plan.files) {
+    const item = element('li', file.install);
+    if (Object.keys(file.tags).length) {
+      const tags = element('ul');
+      for (const [tag, value] of Object.entries(file.tags)) {
+        const before = file.before[tag];
+        tags.append(element('li', before && before !== value ? tag + ' · ' + before + ' → ' + value : tag + ' · ' + value));
+      }
+      item.append(tags);
+    }
+    files.append(item);
+  }
+  const edit = element('button', 'Edit filing details');
+  edit.type = 'button';
+  edit.addEventListener('click', () => { importPreview.hidden = true; importForm.hidden = false; });
+  const approve = element('button', 'Add to library', 'primary');
+  approve.type = 'button';
+  approve.addEventListener('click', async event => {
+    if (!event.isTrusted || importBusy) return;
+    importBusy = approve.disabled = edit.disabled = get('import-close').disabled = true;
+    importStatus.textContent = 'Verifying and filing your download…';
+    try {
+      const query = new URLSearchParams({candidate: plan.candidate, token: plan.token});
+      const result = await action('/api/import-apply?' + query, '', {'X-Spliff-Approval': plan.approval});
+      importDialog.close();
+      showDownloadList();
+      await loadDownloads(result.staging_cleared ? undefined : plan.candidate);
+      notice(completionText(result));
+    } catch (error) {
+      importStatus.textContent = error.message;
+    } finally {
+      importBusy = edit.disabled = get('import-close').disabled = false;
+    }
+  });
+  importPreview.replaceChildren(element('strong', plan.destination),
+    ...(plan.edition ? [element('p', [plan.edition.artist, plan.edition.title, plan.edition.year,
+      plan.edition.country, ...plan.edition.labels.flatMap(label => [label.name, label.catno])].filter(Boolean).join(' · '))] : []),
+    element('h3', 'Folders to create'), folders,
+    element('h3', plan.metadata_mode === 'write' ? 'Files and music tags' : 'Files preserved as downloaded'), files,
+    edit, approve);
+}
+
+if (reviewLink.has('import_candidate')) showImport(reviewLink.get('import_candidate'));

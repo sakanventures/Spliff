@@ -54,7 +54,10 @@ struct ContentView: View {
 private struct SpliffSettings: View {
     @EnvironmentObject var model: CompanionModel
     @Environment(\.dismiss) private var dismiss
-    @StateObject private var preference = ReplacementPreference()
+    @StateObject private var preference = LibraryPreference(
+        path: "/api/replacement-preference", key: "destination", initial: "trash")
+    @StateObject private var metadata = LibraryPreference(
+        path: "/api/file-metadata-preference", key: "mode", initial: "preserve")
 
     var body: some View {
         VStack(alignment: .leading, spacing: 22) {
@@ -83,6 +86,25 @@ private struct SpliffSettings: View {
                         }
                     }
                 }
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("File metadata on import").font(.headline)
+                    Picker("File metadata", selection: $metadata.destination) {
+                        Text("Preserve downloaded files").tag("preserve")
+                        Text("Write verified music tags (FLAC)").tag("write")
+                    }.disabled(metadata.saved == nil || metadata.busy)
+                    Text("Discogs can help identify releases with either setting.")
+                        .foregroundStyle(.secondary)
+                    HStack {
+                        Button("Save metadata preference") { Task { await metadata.load(base: model.dashboardURL, save: true) } }
+                            .buttonStyle(.borderedProminent)
+                            .disabled(metadata.saved == nil || metadata.destination == metadata.saved || metadata.busy)
+                        if metadata.busy { ProgressView().controlSize(.small) }
+                        Text(metadata.status).foregroundStyle(.secondary)
+                        if metadata.saved == nil && !metadata.busy {
+                            Button("Retry") { Task { await metadata.load(base: model.dashboardURL) } }
+                        }
+                    }
+                }
                 Divider()
             }
             DisclosureGroup("ChatGPT connection") { ConnectionView().padding(.top, 12) }
@@ -90,26 +112,38 @@ private struct SpliffSettings: View {
         .padding(24)
         .frame(width: 480)
         .task(id: model.dashboardReady) {
-            if model.dashboardReady { await preference.load(base: model.dashboardURL) }
+            if model.dashboardReady {
+                async let replacement: Void = preference.load(base: model.dashboardURL)
+                async let tagging: Void = metadata.load(base: model.dashboardURL)
+                _ = await (replacement, tagging)
+            }
         }
     }
 }
 
 @MainActor
-private final class ReplacementPreference: ObservableObject {
-    @Published var destination = "trash"
+private final class LibraryPreference: ObservableObject {
+    @Published var destination: String
     @Published var saved: String?
     @Published var status = ""
     @Published var busy = true
+    private let path: String
+    private let key: String
+
+    init(path: String, key: String, initial: String) {
+        self.path = path
+        self.key = key
+        destination = initial
+    }
 
     func load(base: URL, save: Bool = false) async {
         busy = true
         defer { busy = false }
         status = ""
-        guard let endpoint = URL(string: "/api/replacement-preference", relativeTo: base)?.absoluteURL else { return }
+        guard let endpoint = URL(string: path, relativeTo: base)?.absoluteURL else { return }
         var request = URLRequest(url: endpoint)
         if save {
-            request.url = endpoint.appending(queryItems: [URLQueryItem(name: "destination", value: destination)])
+            request.url = endpoint.appending(queryItems: [URLQueryItem(name: key, value: destination)])
             request.httpMethod = "POST"
             request.setValue("dashboard", forHTTPHeaderField: "X-Spliff-Action")
             request.setValue("http://127.0.0.1:\(base.port ?? 8765)", forHTTPHeaderField: "Origin")
@@ -117,7 +151,9 @@ private final class ReplacementPreference: ObservableObject {
         do {
             let (data, response) = try await URLSession.shared.data(for: request)
             guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw URLError(.badServerResponse) }
-            let value = try JSONDecoder().decode(Preference.self, from: data).destination
+            guard let value = try JSONDecoder().decode([String: String].self, from: data)[key] else {
+                throw URLError(.cannotParseResponse)
+            }
             destination = value
             saved = value
             if save { status = "Saved" }
@@ -125,8 +161,6 @@ private final class ReplacementPreference: ObservableObject {
             status = save ? "Couldn’t save the preference." : "Couldn’t load the preference."
         }
     }
-
-    private struct Preference: Decodable { let destination: String }
 }
 
 struct ConnectionView: View {

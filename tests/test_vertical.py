@@ -206,6 +206,11 @@ class VerticalSlice(unittest.TestCase):
         staged = staging / self.album_selection / "001" / self.candidate.name
         staged.parent.mkdir(parents=True)
         shutil.copyfile(self.candidate, staged)
+        (staged.parents[1] / "job.json").write_text(json.dumps({
+            "id": self.album_selection, "kind": "album", "query": "Example Artist Example Album", "created": 1,
+            "entries": [{"directory": "001", "peer": "test", "remote": r"Example Album\Candidate.flac",
+                         "bytes": staged.stat().st_size}],
+        }))
         patcher = patch("spliff.keep_both.staging_root", return_value=staging)
         patcher.start()
         self.addCleanup(patcher.stop)
@@ -230,6 +235,7 @@ class VerticalSlice(unittest.TestCase):
                 patch("spliff.staged_downloads.release_details", return_value=release):
             evidence = cached_edition(self.db, self.album_selection, items)
             self.assertEqual(evidence["releases"][0]["year"], 2007)
+            self.assertNotIn("url", evidence["releases"][0])
             self.assertEqual(cached_edition(self.db, self.album_selection, items), evidence)
             lookup.assert_called_once()
 
@@ -301,6 +307,8 @@ class VerticalSlice(unittest.TestCase):
             self.assertNotIn("token", old)
             self.assertIn(f"review_candidate={selection}", decision["approval_url"])
             self.assertTrue(self.original.exists())
+            self.assertTrue(staged.is_file())
+            self.assertTrue((folder / "job.json").is_file())
             replacement_preference(self.db, "hidden")
             plan = keep_both.preview(self.db, selection, decision["original_track_id"], "replace")
             result = keep_both.apply(self.db, selection, decision["original_track_id"], plan["token"], "replace")
@@ -309,10 +317,16 @@ class VerticalSlice(unittest.TestCase):
             self.assertTrue((self.root / "Protected.mp3").exists())
             self.assertTrue((self.root / "Other.mp3").exists())
             self.assertEqual(self.original.with_suffix(".flac").read_bytes(), self.candidate.read_bytes())
-            self.assertEqual(list_downloads(self.db)[0]["state"], "applied")
+            self.assertEqual(list_downloads(self.db), [])
             self.assertEqual(mcp.review_for_chat(self.db, selection)["completion"], result)
-            self.assertEqual(mcp.transfer_status(self.db, selection)["completion"], result)
-            self.assertFalse(staged.exists())
+            outcome = mcp.transfer_status(self.db, selection)
+            self.assertEqual(outcome["completion"], result)
+            request.reset_mock()
+            self.assertEqual(queue(self.db, selection, original_id=original_id), outcome)
+            request.assert_not_called()
+            self.assertTrue(result["staging_cleared"])
+            self.assertIsNone(result["staging_path"])
+            self.assertFalse(folder.exists())
 
     @unittest.skipUnless(sys.platform == "darwin", "Requires exclusive macOS rename")
     def test_spectral_failure_blocks_destination_preview_without_moving_files(self):
@@ -349,6 +363,8 @@ class VerticalSlice(unittest.TestCase):
             self.assertTrue(staged.exists())
             result = keep_both.apply(self.db, selection, indexed["id"], plan["token"])
         self.assertEqual(result["staging_removed"], 1)
+        self.assertFalse(result["staging_cleared"])
+        self.assertEqual(result["staging_path"], str(staged.parents[1]))
         self.assertFalse(staged.exists())
         self.assertEqual(unrelated.read_bytes(), candidate_bytes)
         self.assertFalse(self.original.exists())
@@ -385,7 +401,8 @@ class VerticalSlice(unittest.TestCase):
             with patch("spliff.keep_both.subprocess.run", side_effect=trash):
                 result = keep_both.apply(self.db, selection, indexed["id"], replace["token"], mode="replace")
         self.assertEqual(result["staging_removed"], 1)
-        self.assertFalse(Path(report["items"][0]["source"]).exists())
+        self.assertTrue(result["staging_cleared"])
+        self.assertFalse(Path(report["items"][0]["source"]).parents[1].exists())
         self.assertIsNone(result["trash_pending"])
         self.assertEqual((self.base / "Test Trash" / self.original.name).read_bytes(), original_bytes)
         self.assertFalse((self.root / ".spliff-originals").exists())
@@ -413,6 +430,46 @@ class VerticalSlice(unittest.TestCase):
         archive = self.root / ".spliff-originals"
         self.assertEqual(Path(result["archive"]), archive.resolve())
         self.assertEqual((archive / self.original.name).read_bytes(), original_bytes)
+
+    @unittest.skipUnless(sys.platform == "darwin", "Requires exclusive macOS rename")
+    def test_keep_both_clears_staging_after_installing_a_recording_alignment_match(self):
+        indexed, report = self.keep_both_fixture()
+        staged = Path(report["items"][0]["source"])
+        report["items"][0].update(assessment="aligned recording", recording_evidence={"matched": True})
+        with patch.object(keep_both, "review_download", return_value=report), \
+                patch.object(keep_both, "compare_measurements", return_value={"status": "Similar audio envelope"}):
+            plan = keep_both.preview(self.db, self.album_selection, indexed["id"])
+            self.assertTrue(staged.exists())
+            result = keep_both.apply(self.db, self.album_selection, indexed["id"], plan["token"])
+        self.assertTrue(result["staging_cleared"])
+        self.assertFalse(staged.parents[1].exists())
+        self.assertEqual(self.original.with_suffix(".flac").read_bytes(), self.candidate.read_bytes())
+        self.assertTrue((self.root / "MP3" / self.original.name).is_file())
+
+    @unittest.skipUnless(sys.platform == "darwin", "Requires exclusive macOS rename")
+    def test_partial_install_keeps_the_skipped_download_in_staging(self):
+        indexed, report = self.keep_both_fixture()
+        staged = Path(report["items"][0]["source"])
+        job = staged.parents[1]
+        skipped = job / "002" / "Bonus track.flac"
+        skipped.parent.mkdir()
+        shutil.copyfile(self.candidate, skipped)
+        receipt = job / "job.json"
+        manifest = json.loads(receipt.read_text())
+        manifest["entries"].append({"directory": "002", "peer": "test",
+                                    "remote": skipped.name, "bytes": skipped.stat().st_size})
+        receipt.write_text(json.dumps(manifest))
+        report["items"].append({"name": skipped.name, "source": str(skipped), "assessment": "no matching title"})
+        report["complete"] = 2
+        with patch.object(keep_both, "review_download", return_value=report):
+            plan = keep_both.preview(self.db, self.album_selection, indexed["id"])
+            result = keep_both.apply(self.db, self.album_selection, indexed["id"], plan["token"])
+        self.assertEqual(result["staging_removed"], 1)
+        self.assertFalse(result["staging_cleared"])
+        self.assertEqual(result["staging_path"], str(job))
+        self.assertFalse(staged.parent.exists())
+        self.assertEqual(skipped.read_bytes(), self.candidate.read_bytes())
+        self.assertTrue(receipt.is_file())
 
     @unittest.skipUnless(sys.platform == "darwin", "Requires exclusive macOS rename")
     def test_trash_failure_keeps_the_verified_original_and_download_recoverable(self):
@@ -577,6 +634,8 @@ class VerticalSlice(unittest.TestCase):
                 result = post(apply_url, {**headers, **approval})
                 self.assertEqual(result["upgraded"], 1)
                 self.assertTrue((Path(result["archive"]) / self.original.name).is_file())
+                self.assertTrue(result["staging_cleared"])
+                self.assertFalse(Path(report["items"][0]["source"]).parents[1].exists())
                 with self.assertRaises(HTTPError) as repeated:
                     post(apply_url, {**headers, **approval})
                 self.assertIn("Open the local upgrade review again", json.load(repeated.exception)["error"])

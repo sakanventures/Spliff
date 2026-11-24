@@ -23,18 +23,20 @@ def queue(db, candidate_id=None, *, original_id=None, source="manual"):
     if source not in {"mcp", "dashboard", "manual"}:
         raise ValueError("Staging requires an explicit candidate selection.")
     kind, _, _ = selection_parts(candidate_id)
-    if original_id is not None:
-        indexed = originals(db, original_id, kind)
-        if kind == "album" and not indexed[0]["album"]:
-            raise ValueError("Choose an indexed album to compare.")
-    with closing(connect(db)) as connection:
-        roots = [row["path"] for row in connection.execute("SELECT path FROM roots")]
     try:
         read_job(staging_root() / candidate_id)
     except ValueError:
         existing = False
     else:
         existing = True
+    if applied := applied_transfer(db, candidate_id):
+        return applied
+    if original_id is not None:
+        indexed = originals(db, original_id, kind)
+        if kind == "album" and not indexed[0]["album"]:
+            raise ValueError("Choose an indexed album to compare.")
+    with closing(connect(db)) as connection:
+        roots = [row["path"] for row in connection.execute("SELECT path FROM roots")]
     receipt = None if existing else saved_fingerprint(db, candidate_id)
     if not existing and not receipt:
         raise ValueError("Search again and explicitly select a candidate with a saved peer/file receipt.")
@@ -60,6 +62,18 @@ def queue(db, candidate_id=None, *, original_id=None, source="manual"):
                       "requires_status_check": True,
                       "message": "Nicotine+ has not confirmed this action. Check nicotine_transfer_status before any retry; do not treat this as a definite failure."}
     return public_status(result)
+
+
+def applied_transfer(db, candidate_id):
+    with closing(connect(db)) as connection:
+        applied = connection.execute("""
+            SELECT k.mode,k.destination,r.result FROM kept_albums k LEFT JOIN upgrade_results r
+            ON r.candidate=k.candidate WHERE k.candidate=?
+        """, (candidate_id,)).fetchone()
+    if applied:
+        return {"id": candidate_id, "state": "applied", "mode": applied["mode"],
+                "destination": applied["destination"],
+                "completion": json.loads(applied["result"]) if applied["result"] else None}
 
 
 def public_status(result):
@@ -333,7 +347,7 @@ def cached_edition(db, candidate, items):
             "SELECT evidence FROM edition_evidence WHERE candidate=? AND metadata_key=?",
             (candidate, signature_key)).fetchone()
     if cached:
-        return json.loads(cached["evidence"])
+        return music_edition_evidence(json.loads(cached["evidence"]))
     evidence = {"status": "No corroborating edition found", "releases": []}
     try:
         release_candidates = search_releases(db, first["artist"], first["album"], limit=3)["items"]
@@ -350,7 +364,7 @@ def cached_edition(db, candidate, items):
                 if len(listing) != len(ordered):
                     continue
                 if all(edition_track_matches(track, item[0]) for track, item in zip(listing, ordered)):
-                    evidence["releases"].append({key: edition[key] for key in ("id", "url", "title", "year")})
+                    evidence["releases"].append({key: edition[key] for key in ("id", "title", "year")})
             if evidence["releases"]:
                 evidence["status"] = "Discogs tracklist corroborates title, order and available durations"
     except (OSError, ValueError):
@@ -360,6 +374,13 @@ def cached_edition(db, candidate, items):
     with closing(connect(db)) as connection, connection:
         connection.execute("INSERT OR REPLACE INTO edition_evidence VALUES (?,?,?)",
                            (candidate, signature_key, json.dumps(evidence)))
+    return evidence
+
+
+def music_edition_evidence(evidence):
+    if evidence:
+        for release in evidence.get("releases", []):
+            release.pop("url", None)
     return evidence
 
 
@@ -374,19 +395,16 @@ def edition_track_matches(edition, audio):
 def review_download(db, candidate_id=None, original_track_id=None, *, include_sources=False, research=False):
     selection_parts(candidate_id)
     selected_original_id = original_track_id
-    result = transfer_status(candidate_id)
-    directory = staging_root() / candidate_id
-    binary = find_probe() if result["complete"] else None
-    report = public_status({key: value for key, value in result.items() if key != "entries"})
     with closing(connect(db)) as connection:
         kept = connection.execute("SELECT destination,mode FROM kept_albums WHERE candidate=?",
                                   (candidate_id,)).fetchone()
         saved = connection.execute("SELECT report FROM transfer_reviews WHERE candidate=?", (candidate_id,)).fetchone()
-        outcome = connection.execute("SELECT result FROM upgrade_results WHERE candidate=?", (candidate_id,)).fetchone()
         if kept and saved:
+            outcome = connection.execute("SELECT result FROM upgrade_results WHERE candidate=?", (candidate_id,)).fetchone()
             report = json.loads(saved["report"])
             report["kept_both"] = dict(kept)
             report["completion"] = json.loads(outcome["result"]) if outcome else None
+            report["edition_evidence"] = music_edition_evidence(report.get("edition_evidence"))
             for item in report["items"]:
                 item.pop("source", None)
                 item.pop("fingerprint", None)
@@ -399,6 +417,10 @@ def review_download(db, candidate_id=None, original_track_id=None, *, include_so
             """, (candidate_id,)).fetchone()
             if selected:
                 original_track_id = selected["id"]
+    result = transfer_status(candidate_id)
+    directory = staging_root() / candidate_id
+    binary = find_probe() if result["complete"] else None
+    report = public_status({key: value for key, value in result.items() if key != "entries"})
     indexed = originals(db, original_track_id, result["kind"])
     report["kept_both"] = dict(kept) if kept else None
     possible = set()
@@ -419,7 +441,7 @@ def review_download(db, candidate_id=None, original_track_id=None, *, include_so
         item["source"] = str(directory / transfer["file"])
         item["fingerprint"] = fingerprint
     if saved:
-        report["edition_evidence"] = json.loads(saved["report"]).get("edition_evidence")
+        report["edition_evidence"] = music_edition_evidence(json.loads(saved["report"]).get("edition_evidence"))
     if research and result["kind"] == "album" and len(report["items"]) == report["complete"]:
         report["edition_evidence"] = cached_edition(db, candidate_id, report["items"])
     suggested = original_track_id is None and result["kind"] == "album"

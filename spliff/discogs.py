@@ -83,7 +83,18 @@ def release_details(_db, release_id):
             "url": f"https://www.discogs.com/release/{release_id}",
             **{key: result.get(key) for key in ("title", "year", "released", "formats", "country")},
             "artists": [artist.get("name") for artist in result.get("artists", [])],
+            "artist_credits": [{key: artist.get(key) for key in ("id", "name", "anv")}
+                               for artist in result.get("artists", [])],
+            "credits": [{key: credit.get(key) for key in ("name", "role")}
+                        for credit in result.get("extraartists", [])],
             "labels": [{key: label.get(key) for key in ("name", "catno")}
                        for label in result.get("labels", [])],
             "tracklist": [{key: track.get(key) for key in ("position", "title", "duration", "type_")}
                           for track in result.get("tracklist", [])]}
+
+
+def artist_aliases(artist_id):
+    if type(artist_id) is not int or not 1 <= artist_id < 2**63:
+        return []
+    result = fetch(f"/artists/{artist_id}")
+    return [alias["name"] for alias in result.get("aliases", []) if alias.get("name")]

@@ -136,6 +136,7 @@
             <div class="comparison-actions">
               <button id="choose-original" type="button">Choose comparison album</button>
               <button id="keep-both" class="primary" type="button" hidden>Use FLACs</button>
+              <button id="add-download" class="primary" type="button" hidden>Add to library</button>
             </div>
           </div>
           <p id="download-note" class="muted" hidden></p>
@@ -177,6 +178,12 @@
             <option value="hidden">Keep originals in a hidden recovery folder</option>
           </select>
         </label>
+        <label>File metadata on import
+          <select id="file-metadata" disabled>
+            <option value="preserve">Preserve downloaded files</option>
+            <option value="write">Write verified music tags (FLAC)</option>
+          </select>
+        </label>
         <button type="submit" disabled>Save</button>
       </form>
       <p id="settings-status" role="status"></p>
@@ -186,6 +193,29 @@
       <p id="keep-both-status" role="status"></p>
       <div id="upgrade-options"></div>
       <button id="cancel-keep-both" type="button" autofocus>Cancel</button>
+    </dialog>
+    <dialog id="import-dialog" aria-labelledby="import-heading">
+      <div class="dialog-heading">
+        <h2 id="import-heading">Add to library</h2>
+        <button id="import-close" type="button">Close</button>
+      </div>
+      <form id="import-details" hidden>
+        <label>Music library <select name="root" required></select></label>
+        <button id="import-pick-root" type="button">Choose a folder…</button>
+        <label id="import-edition-row" hidden>Discogs edition <select name="edition"></select></label>
+        <label>Artist <input name="artist" maxlength="180" required></label>
+        <label>Release title <input name="title" maxlength="180" required></label>
+        <label>Edition year <input name="year" inputmode="numeric" pattern="[12][0-9]{3}" required></label>
+        <label>Category
+          <select name="category" required></select>
+        </label>
+        <label id="import-posthumous-row" hidden>
+          <input name="posthumous" type="checkbox"> This album was first released after the artist’s death
+        </label>
+        <button type="submit">Review destination</button>
+      </form>
+      <p id="import-status" role="status"></p>
+      <section id="import-preview" hidden></section>
     </dialog>
   </main>
   <aside id="scan-footer" aria-label="Folder scan" hidden>
