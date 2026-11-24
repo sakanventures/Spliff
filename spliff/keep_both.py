@@ -165,7 +165,7 @@ def get_plan(db, candidate, original, mode="keep"):
             pairs.append({"id": track["id"], "mp3": str(mp3), "mp3_sig": mp3_sig, "codec": track["codec"],
                           "flac": str(staged), "flac_sig": tuple(item["fingerprint"]), "name": final.name,
                           "relative": str(final.relative_to(folder)), "audio": item["audio"],
-                          "assessment": item["assessment"]})
+                          "assessment": item["assessment"], "recording_evidence": item.get("recording_evidence")})
     if not pairs:
         raise ValueError("No confident, unprotected lossless upgrades are ready to apply.")
     if folder.name.casefold() in {"mp3", ".spliff-originals"}:
@@ -250,7 +250,7 @@ def preview(db, candidate, original, mode="keep"):
                "archive": archive, "count": len(plan["pairs"]), "skipped": plan["skipped"],
                "preserved": plan["preserved"],
                "files": [{"original": pair["mp3"], "install": str(destination / pair["relative"]),
-                          "audio_evidence": pair["evidence"],
+                          "audio_evidence": pair["evidence"], "recording_evidence": pair["recording_evidence"],
                           "archive": str(Path(archive) / Path(pair["mp3"]).relative_to(destination))
                           if plan["original_mode"] != "trash" else "Mac Trash"}
                          for pair in plan["pairs"]],
@@ -488,6 +488,8 @@ def apply(db, candidate, original, token, mode="keep"):
                 del copies[temporary]
                 published.append((final, fingerprint))
                 verify_published(final, fingerprint, digest)
+                if pair["recording_evidence"]:
+                    analyze_file(final, fingerprint)
                 columns = ("root", "path", *AUDIO_FIELDS, "size", "mtime", "device", "inode")
                 connection.execute(
                     f"INSERT INTO tracks({','.join(columns)}) VALUES ({','.join('?' for _ in columns)})",
@@ -505,6 +507,8 @@ def apply(db, candidate, original, token, mode="keep"):
                 saved_sig = move_exclusive(source, saved, identities=identities,
                                            expected=pair["mp3_sig"])
                 moved.append((source, saved, saved_sig))
+                if verified_digest(saved, saved_sig) != pair["original_digest"]:
+                    raise ValueError("The preserved MP3 failed verification.")
                 connection.execute(
                     "UPDATE tracks SET path=?,size=?,mtime=?,device=?,inode=?,present=? WHERE id=?",
                     (str(saved.relative_to(root)), *saved_sig, int(mode == "keep"), pair["id"]),
@@ -546,7 +550,7 @@ def apply(db, candidate, original, token, mode="keep"):
         except (OSError, ValueError, subprocess.SubprocessError):
             trash_pending = str(archive)
     staging_removed = 0
-    if not trash_pending:
+    if not trash_pending and not any(pair["recording_evidence"] for pair in plan["pairs"]):
         staging_removed = remove_staged_copies(plan, published)
     work_cleanup_pending = True
     if not trash_pending:

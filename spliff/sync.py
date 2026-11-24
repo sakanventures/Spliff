@@ -14,14 +14,49 @@ from .staged_downloads import list_downloads, originals, recording_credit, revie
 LOG = logging.getLogger(__name__)
 
 
+def selected_folders(folders):
+    if not isinstance(folders, list) or not folders or any(
+        not isinstance(folder, str) or not folder.strip() or "\x00" in folder
+        or not Path(folder).expanduser().is_absolute() for folder in folders
+    ):
+        raise ValueError("Choose one or more absolute paths to local music folders.")
+    return sorted(dict.fromkeys(Path(folder).expanduser().resolve() for folder in folders),
+                  key=lambda root: len(root.parts))
+
+
+def remember_folders(db, roots):
+    with closing(connect(db)) as connection, connection:
+        connection.executemany("INSERT OR REPLACE INTO sync_folders(root) VALUES (?)",
+                               [(str(root),) for root in roots])
+
+
 def start(db, folder=None):
-    if not isinstance(folder, str) or not folder.strip() or not Path(folder).expanduser().is_absolute():
-        raise ValueError("Choose an absolute path to the local music folder.")
-    root = Path(folder).expanduser().resolve(strict=True)
+    root, = selected_folders([folder])
+    result = scan_folder(db, root)
+    remember_folders(db, [root])
+    return result
+
+
+def start_many(db, roots, progress):
+    completed = []
+    failures = []
+    for index, root in enumerate(roots):
+        progress(index, str(root), failures)
+        if any(root.is_relative_to(parent) for parent in completed):
+            continue
+        try:
+            scan_folder(db, root)
+        except (OSError, ValueError, sqlite3.Error) as exc:
+            failures.append({"folder": str(root), "error": str(exc)})
+        else:
+            completed.append(root)
+    progress(len(roots), None, failures)
+
+
+def scan_folder(db, root):
     scanned = scan(db, root)
     with closing(connect(db)) as connection, connection:
         connection.execute("BEGIN IMMEDIATE")
-        connection.execute("INSERT OR REPLACE INTO sync_folders(root) VALUES (?)", (str(root),))
         rows = connection.execute("""
             SELECT id,root,path,artist,album,title FROM tracks
             WHERE quality='lossy' AND present=1 AND error IS NULL AND protected=0

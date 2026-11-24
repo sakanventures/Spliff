@@ -49,6 +49,8 @@ def main():
                            default=Path.home() / ".local/share/nicotine/plugins")
     control = commands.add_parser("nicotine-downloads", help="Enable or stop Spliff transfers locally")
     control.add_argument("action", choices=("enable", "stop"))
+    recovery = commands.add_parser("nicotine-recover", help="Authorize manual resume of selected paused jobs")
+    recovery.add_argument("candidate_id", nargs="+")
     commands.add_parser("nicotine-status", help="Check whether the Nicotine+ bridge is available")
     commands.add_parser("discogs-setup", help="Open a one-time local Discogs setup page")
     for action in ("protect", "unprotect"):
@@ -81,6 +83,9 @@ def main():
             return 0
         if args.command == "nicotine-downloads":
             print(json.dumps(transfer_control(args.action)))
+            return 0
+        if args.command == "nicotine-recover":
+            print(json.dumps(request("authorize_recovery", selections=args.candidate_id)))
             return 0
         if args.command == "nicotine-status":
             print(json.dumps(request("status")))

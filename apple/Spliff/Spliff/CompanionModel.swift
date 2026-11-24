@@ -25,6 +25,7 @@ final class CompanionModel: ObservableObject {
     @Published var project: URL
     @Published var revision = UUID()
     private var checking = false
+    private var choosingMusic = false
     private var port = 8765
 
     init() {
@@ -103,6 +104,7 @@ final class CompanionModel: ObservableObject {
         dashboardReady = report.ready.dashboard
         connected = report.ready.tunnel
         if dashboardReady && !wasReady { revision = UUID() }
+        if dashboardReady && message == "Restarting…" { message = "" }
     }
 
     func install(key: String) async {
@@ -131,7 +133,7 @@ final class CompanionModel: ObservableObject {
         busy = false
         message = result.code == 0 ? "Restarting…" : result.error
         await refresh()
-        if result.code == 0 && connected { message = "" }
+        if result.code == 0 && dashboardReady { message = "" }
         revision = UUID()
     }
 
@@ -148,23 +150,42 @@ final class CompanionModel: ObservableObject {
     }
 
     func chooseMusic() {
+        guard !choosingMusic else { return }
+        choosingMusic = true
         let panel = NSOpenPanel()
-        panel.canChooseDirectories = true; panel.canChooseFiles = false
-        panel.prompt = "Choose music"
-        guard panel.runModal() == .OK, let url = panel.url else { return }
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = true
+        panel.prompt = "Choose folders"
+        panel.message = "Select one or more folders to scan for music."
+        guard panel.runModal() == .OK, !panel.urls.isEmpty else {
+            choosingMusic = false
+            return
+        }
+        let folders = panel.urls.map(\.path)
+        let base = dashboardURL
+        message = ""
         Task {
-            busy = true; message = "Syncing music…"
-            // Follow the active service catalog if it differs from this checkout's default.
-            var db = database.path
-            let settings = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/Spliff/Services/settings.json")
-            if let data = try? Data(contentsOf: settings), let saved = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let value = saved["db"] as? String { db = value }
-            let result = await Self.run(project: project, arguments: ["--db", db, "sync", url.path])
-            busy = false
-            message = result.code == 0 ? "Folder sync started." : result.error
-            if result.code == 0 { revision = UUID() }
+            defer { choosingMusic = false }
+            guard let endpoint = URL(string: "/api/scan", relativeTo: base)?.absoluteURL else { return }
+            var request = URLRequest(url: endpoint)
+            request.httpMethod = "POST"
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+            request.setValue("dashboard", forHTTPHeaderField: "X-Spliff-Action")
+            request.setValue("http://127.0.0.1:\(port)", forHTTPHeaderField: "Origin")
+            do {
+                request.httpBody = try JSONEncoder().encode(folders)
+                let (data, response) = try await URLSession.shared.data(for: request)
+                if (response as? HTTPURLResponse)?.statusCode != 202 {
+                    let error = try? JSONDecoder().decode([String: String].self, from: data)
+                    message = error?["error"] ?? "Couldn’t start the folder scan."
+                }
+            } catch {
+                message = "Couldn’t start the folder scan."
+            }
         }
     }
+
 }
 
 // Access is synchronized by DispatchGroup completion before the value is read.

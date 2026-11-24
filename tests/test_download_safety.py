@@ -108,3 +108,23 @@ class DownloadSafety(unittest.TestCase):
         self.assertFalse(self.bridge.permit_transfer(staged, 1024))
         with self.assertRaisesRegex(ValueError, "disabled"):
             self.submit("b" * 32, files, files)
+
+    def test_recovery_authorizes_exact_paused_files_without_queueing(self):
+        first = self.offer("one", "Release One", 18)
+        second = self.offer("one", "Release Two", 21)
+        unrelated = self.offer("one", "Unrelated", 2)
+        for letter, files in (("a", first), ("b", second), ("c", unrelated)):
+            self.submit(letter * 32, files, files)
+        for transfer in list(self.transfers.values())[:6]:
+            transfer.status = "Finished"
+        self.bridge.stop()
+        selections = [f"album-{letter * 32}-0" for letter in "ab"]
+        self.assertEqual(self.bridge.recover(selections)["authorized_paused_files"], 33)
+        self.assertEqual(len(self.calls), 41)
+        self.assertFalse((self.root / ENABLE_FILE).exists())
+        self.assertEqual(sum(self.bridge.permit_transfer(t, t.size) for t in self.transfers.values()), 33)
+        transfer = self.transfers[second[0]["peer"] + second[0]["path"]]
+        self.assertEqual(transfer.status, "Paused")
+        self.assertFalse(self.bridge.permit_transfer(transfer, transfer.size + 1))
+        self.bridge.stop()
+        self.assertFalse(self.bridge.permit_transfer(transfer, transfer.size))

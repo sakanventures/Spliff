@@ -14,6 +14,7 @@ from .catalog import connect, find_probe, read_audio, signature
 from .artist import release_folder
 from .discogs import release_details, search_releases
 from .nicotine import request
+from .recording_match import compare_recordings
 from .nicotine_bridge.downloads import SELECTION, read_job, selection_parts
 from .nicotine_bridge.wire import staging_root
 
@@ -241,7 +242,7 @@ def inspect_file(binary, directory, relative, timeout):
         os.close(parent)
 
 
-MATCH_ASSESSMENTS = {"possible match", "check track order", "check featured credits"}
+MATCH_ASSESSMENTS = {"possible match", "check track order", "check featured credits", "aligned recording"}
 
 
 def match_item(item, indexed, kind, filename):
@@ -372,6 +373,7 @@ def edition_track_matches(edition, audio):
 
 def review_download(db, candidate_id=None, original_track_id=None, *, include_sources=False, research=False):
     selection_parts(candidate_id)
+    selected_original_id = original_track_id
     result = transfer_status(candidate_id)
     directory = staging_root() / candidate_id
     binary = find_probe() if result["complete"] else None
@@ -423,23 +425,36 @@ def review_download(db, candidate_id=None, original_track_id=None, *, include_so
     suggested = original_track_id is None and result["kind"] == "album"
     if suggested:
         indexed = suggest_album(db, report["items"])
-    report["comparison"] = ({"album": indexed[0]["album"], "suggested": suggested,
-                              "original_track_id": indexed[0]["id"]} if indexed else None)
+    explicit = next((track for track in indexed if track["id"] == original_track_id), None)
+    comparison = explicit or (indexed[0] if indexed else None)
+    report["comparison"] = ({"album": comparison["album"], "suggested": suggested,
+                              "original_track_id": comparison["id"]} if comparison else None)
     tagged_albums = {title_key(item["audio"]["album"]) for item in report["items"]
                      if item.get("audio", {}).get("album")}
     selected_album = indexed[0]["album"] if indexed else None
-    if result["kind"] == "album" and selected_album and tagged_albums and title_key(selected_album) not in tagged_albums:
+    album_mismatch = (result["kind"] == "album" and selected_album and tagged_albums
+                      and title_key(selected_album) not in tagged_albums)
+    if album_mismatch:
         report["comparison"]["album_mismatch"] = True
-        report["originals_without_match"] = []
-        return save_review(db, report, include_sources)
+    # Only one uniquely identified item may use the stronger alignment path.
+    exact = [item for item in report["items"] if selected_original_id and explicit and item.get("audio")
+             and recording_title(item["audio"]) == recording_title(explicit)]
     for item in report["items"]:
         if "audio" not in item:
             continue
         metadata = item["audio"]
-        item["assessment"], original = match_item(metadata, indexed, result["kind"], item["name"])
+        assessment, original = match_item(metadata, [explicit] if album_mismatch and explicit else indexed,
+                                          result["kind"], item["name"])
+        if album_mismatch:
+            assessment = "check release tags"
+        if (assessment in {"check duration", "check release tags"} and len(exact) == 1
+                and item is exact[0] and metadata["quality"] == "lossless"
+                and align_selected_recording(db, item, explicit)):
+            assessment, original = "aligned recording", explicit
+        item["assessment"] = assessment
         if original:
             item["original"] = original
-            if item["assessment"] in MATCH_ASSESSMENTS:
+            if assessment in MATCH_ASSESSMENTS:
                 possible.add(original["id"])
     for original_id in possible:
         matches = [item for item in report["items"] if item.get("assessment") in MATCH_ASSESSMENTS
@@ -448,10 +463,44 @@ def review_download(db, candidate_id=None, original_track_id=None, *, include_so
             for item in matches:
                 item["assessment"] = "ambiguous duplicate recording"
     possible = {item["original"]["id"] for item in report["items"]
-                if item.get("assessment") == "possible match"}
+                if item.get("assessment") in {"possible match", "aligned recording"}}
     report["originals_without_match"] = [item for item in indexed if item["id"] not in possible]
     return save_review(db, report, include_sources)
 
+
+
+def align_selected_recording(db, item, original):
+    """Resolve a duration or edition discrepancy for one indexed selection."""
+    audio = item["audio"]
+    # Some taggers serialize multi-value artist credits with a slash.
+    def artist_credit(track):
+        lead, separator, guests = (track["artist"] or "").partition("/")
+        return recording_credit(lead + (" feat. " + guests if separator else ""))
+    if (original["protected"] or original["quality"] != "lossy"
+            or not recording_title(original) or recording_title(original) != recording_title(audio)
+            or not same_credit(artist_credit(original), artist_credit(audio))):
+        return False
+    if set(VERSION.findall(audio["title"].casefold())) != set(VERSION.findall(original["title"].casefold())):
+        return False
+    filename_variant = re.search(r"[\[(]([^]()]*)[\])]\s*$", Path(item["name"]).stem)
+    if (filename_variant and VERSION.search(filename_variant[1])
+            and title_key(filename_variant[1]) not in title_key(original["title"])):
+        return False
+    with closing(connect(db)) as connection:
+        row = connection.execute("SELECT size,mtime,device,inode FROM tracks WHERE id=? AND present=1",
+                                 (original["id"],)).fetchone()
+    if row is None:
+        return False
+    try:
+        evidence = compare_recordings(str(Path(original["root"]) / original["path"]), tuple(row),
+                                      item["source"], tuple(item["fingerprint"]))
+    except (OSError, ValueError) as exc:
+        item["recording_evidence"] = {"matched": False, "reason": str(exc)}
+        return False
+    item["recording_evidence"] = {
+        **evidence, "original_release": original["album"], "download_release": audio["album"],
+    }
+    return evidence["matched"]
 
 def save_review(db, report, include_sources):
     if report["items"] and report["complete"] == len(report["items"]):

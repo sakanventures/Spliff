@@ -3,6 +3,7 @@ __pycache__/
 *.sqlite
 *.sqlite-shm
 *.sqlite-wal
+*.sync.lock
 .venv/
 .DS_Store
 *.egg-info/

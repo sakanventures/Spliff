@@ -29,9 +29,13 @@
     <section id="sync-panel" aria-labelledby="sync-heading">
       <div class="hero">
         <h1 id="sync-heading">Upgrade your music</h1>
-        <p>Choose a folder. Spliff finds and reviews lossless upgrades before you decide what to keep.</p>
-        <button id="sync-folder" class="primary" type="button">Choose music folder</button>
+        <p>Choose one or more folders. Spliff finds and reviews lossless upgrades before you decide what to keep.</p>
+        <button id="sync-folder" class="primary" type="button">Choose music folders</button>
       </div>
+      <section id="sync-folder-list" aria-labelledby="sync-folders-heading" hidden>
+        <h2 id="sync-folders-heading">Music folders</h2>
+        <ul id="sync-folders"></ul>
+      </section>
       <p id="sync-status" role="status"></p>
       <button id="sync-downloads" type="button">View downloads</button>
       <details id="sync-details" hidden><summary>Sync details</summary><ul id="sync-items"></ul></details>
@@ -184,5 +188,13 @@
       <button id="cancel-keep-both" type="button" autofocus>Cancel</button>
     </dialog>
   </main>
+  <aside id="scan-footer" aria-label="Folder scan" hidden>
+    <div id="scan-summary">
+      <span id="scan-label" role="status"></span>
+      <button id="scan-dismiss" type="button" aria-label="Dismiss scan status" hidden>×</button>
+    </div>
+    <progress id="scan-bar" aria-label="Selected folders processed" value="0" max="1"></progress>
+    <ul id="scan-errors" hidden></ul>
+  </aside>
 </body>
 </html>

@@ -784,31 +784,73 @@ document.addEventListener('drop', event => {
   if (event.dataTransfer.types.includes('Files')) event.preventDefault();
 });
 
+let pickerOpen = false;
+let lastScan;
+let dismissedScan = false;
+let checkingScan = false;
+
+function updatePickerButtons() {
+  const disabled = pickerOpen || Boolean(lastScan?.current);
+  get('add-library').disabled = get('sync-folder').disabled = disabled;
+}
+
 async function scanMusic() {
   if (companion) {
     window.webkit.messageHandlers.spliffMac.postMessage('chooseMusic');
     return;
   }
-  get('add-library').disabled = true;
-  get('sync-folder').disabled = true;
-  notice('Choose a music folder in Finder.');
+  pickerOpen = true;
+  updatePickerButtons();
   try {
     const result = await action('/api/scan');
-    if (result.cancelled) {
-      notice('Folder selection canceled.');
-    } else {
-      notice(`Folder indexed. ${result.targets} upgrade searches scheduled.`);
+    if (result.started) {
+      get('action-status').hidden = true;
       view('sync');
-      if (document.body.dataset.view === 'tracks') { refreshSummary(); loadTracks(); }
-      if (document.body.dataset.view === 'albums') showAlbumLibrary();
+      await loadScanProgress();
     }
   } catch (error) {
     notice(error.message);
   } finally {
-    get('add-library').disabled = false;
-    get('sync-folder').disabled = false;
+    pickerOpen = false;
+    updatePickerButtons();
   }
 }
+
+async function loadScanProgress() {
+  if (checkingScan) return;
+  checkingScan = true;
+  try {
+    const {scan} = await api('/api/scan-progress');
+    const isScanning = Boolean(scan?.current);
+    const changed = JSON.stringify(scan) !== JSON.stringify(lastScan);
+    if (scan?.id !== lastScan?.id) dismissedScan = false;
+    lastScan = scan;
+    if (!scan || !changed) return;
+    if (document.body.dataset.view === 'sync') loadSync();
+    if (isScanning) dismissedScan = false;
+    const count = `${scan.completed} / ${scan.total} folders`;
+    const folder = scan.current?.split('/').filter(Boolean).pop() || scan.current;
+    get('scan-label').textContent = isScanning ? `Reading ${folder} · ${count}` :
+      `Scan finished · ${count}${scan.failures.length ? ` · ${scan.failures.length} failed` : ''}`;
+    get('scan-bar').max = scan.total;
+    get('scan-bar').value = scan.completed;
+    get('scan-dismiss').hidden = isScanning;
+    get('scan-errors').hidden = !scan.failures.length;
+    get('scan-errors').replaceChildren(...scan.failures.map(item =>
+      element('li', `${item.folder} · ${item.error}`)));
+    get('scan-footer').hidden = dismissedScan;
+    updatePickerButtons();
+  } catch {
+    // Progress is available again when the local dashboard reconnects.
+  } finally {
+    checkingScan = false;
+  }
+}
+
+get('scan-dismiss').addEventListener('click', () => {
+  dismissedScan = true;
+  get('scan-footer').hidden = true;
+});
 
 let syncTimer;
 let syncRequest = 0;
@@ -823,11 +865,17 @@ async function loadSync() {
     const labels = {queued: 'Searching', candidate_ready: 'Awaiting selection', downloading: 'Downloading', queueing: 'Starting', reviewing: 'Reviewing audio', reviewed: 'Reviewed',
       applied: 'Applied', no_candidate: 'No offer', search_failed: 'Search failed', queue_uncertain: 'Transfer needs attention'};
     get('sync-status').textContent = Object.entries(counts).map(([key, count]) => `${labels[key]} · ${count}`).join('   ')
-      || (folders.length ? 'No eligible upgrades in the selected folders.' : '');
-    get('sync-details').hidden = !folders.length;
+      || (folders.length && !lastScan?.current ? 'No eligible upgrades in the selected folders.' : '');
+    get('sync-folder-list').hidden = !folders.length;
+    get('sync-folders').replaceChildren(...folders.map(folder => {
+      const row = element('li');
+      row.append(element('strong', folder.split('/').filter(Boolean).pop() || folder),
+        element('small', folder, 'muted'));
+      return row;
+    }));
+    get('sync-details').hidden = !items.length;
     get('sync-downloads').hidden = !folders.length;
-    get('sync-items').replaceChildren(...folders.map(folder => element('li', folder)),
-      ...items.map(item => element('li', [item.query, labels[item.current_state], item.detail].filter(Boolean).join(' · '))));
+    get('sync-items').replaceChildren(...items.map(item => element('li', [item.query, labels[item.current_state], item.detail].filter(Boolean).join(' · '))));
   } catch (error) {
     get('sync-status').textContent = error.message;
   } finally {
@@ -848,6 +896,8 @@ if (companion) {
 }
 get('download-comparison-control').append(get('choose-original'));
 view('sync');
+loadScanProgress();
+setInterval(loadScanProgress, 1000);
 
 // One graph, one track selector, one source switch. Analysis stays on this Mac.
 function spectrumViewer(container, choices, parameters) {

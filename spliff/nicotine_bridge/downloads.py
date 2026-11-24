@@ -88,6 +88,7 @@ class Downloads:
         self.core = core
         self.config = config
         self.allowed = {}
+        self.recovery = {}
 
     @staticmethod
     def is_staged(transfer, root):
@@ -98,15 +99,72 @@ class Downloads:
         if not self.is_staged(transfer, root):
             return True
         key = (transfer.username, transfer.virtual_path, transfer.folder_path)
-        size = self.allowed.get(key)
-        return (enabled(root) and size is not None and transfer.size == size
-                and claimed_size in (0, size))
+        size = self.recovery.get(key)
+        if size is None and enabled(root):
+            size = self.allowed.get(key)
+        return size is not None and transfer.size == size and claimed_size in (0, size)
+
+    @staticmethod
+    def transfer_key(transfer):
+        return transfer.username, transfer.virtual_path, transfer.folder_path
+
+    def outstanding(self, root):
+        return {self.transfer_key(transfer): transfer.size
+                for transfer in self.core.downloads.transfers.values()
+                if self.is_staged(transfer, root) and transfer.status not in INACTIVE}
+
+    def recover(self, selections):
+        """Permit manual retry of exact paused rows, without queueing or retrying."""
+        if (not isinstance(selections, list) or not 1 <= len(selections) <= 10
+                or any(not isinstance(selection, str) for selection in selections)
+                or len(set(selections)) != len(selections)):
+            raise ValueError("Provide one or more different staged candidate IDs.")
+        root = staging_root()
+        private_folder(root)
+        transfers = self.core.downloads.transfers
+        approved = {}
+        for selection in selections:
+            selection_parts(selection)
+            folder = root / selection
+            job = read_job(folder)
+            if job.get("id") != selection:
+                raise ValueError("The staged job ID does not match its manifest.")
+            for entry in job["entries"]:
+                peer, remote, size = entry["peer"], entry["remote"], entry["bytes"]
+                directory = entry["directory"]
+                if not re.fullmatch(r"[0-9]{3}", directory):
+                    raise ValueError("The staged job has an invalid download directory.")
+                destination = folder / directory
+                if destination.resolve() != destination or not destination.is_dir():
+                    raise ValueError("The staged download directory is unavailable.")
+                key = (peer, remote, str(destination))
+                transfer = transfers.get(peer + remote)
+                if transfer is None:
+                    continue
+                if (self.transfer_key(transfer) != key or transfer.size != size
+                        or not valid_file({"peer": peer, "path": remote, "bytes": size,
+                                           "format": PureWindowsPath(remote).suffix.lower().lstrip(".")})):
+                    raise ValueError("A saved transfer differs from its staging manifest.")
+                if transfer.status == "Paused":
+                    approved[key] = size
+        if not approved:
+            raise ValueError("No matching paused transfers were found.")
+        reserved = {**self.outstanding(root), **self.recovery, **approved}
+        if len(reserved) > MAX_TRACKS or sum(reserved.values()) > MAX_BYTES:
+            raise ValueError("Recovery would exceed 60 files or 8 GiB.")
+        audit(root, "manual_recovery_authorized", selections=selections,
+              entries=[{"peer": peer, "remote": remote, "directory": directory, "bytes": size}
+                       for (peer, remote, directory), size in approved.items()])
+        self.recovery.update(approved)
+        return {"authorized_paused_files": len(approved), "selections": selections}
+
 
     def stop(self):
         root = staging_root()
         private_folder(root)
         (root / ENABLE_FILE).unlink(missing_ok=True)
         self.allowed.clear()
+        self.recovery.clear()
         transfers = self.core.downloads.transfers
         matches = []
         for folder in root.iterdir():
@@ -171,9 +229,8 @@ class Downloads:
             if (transfer := transfers.get(key[0] + key[1])) is not None
             and transfer.folder_path == key[2] and transfer.status not in INACTIVE
         }
-        outstanding = [transfer for transfer in transfers.values()
-                       if self.is_staged(transfer, root) and transfer.status not in INACTIVE]
-        reserved = sum(transfer.size for transfer in outstanding)
+        outstanding = {**self.outstanding(root), **self.recovery}
+        reserved = sum(outstanding.values())
         if len(outstanding) + len(selected) > MAX_TRACKS or reserved + size > MAX_BYTES:
             raise ValueError("The outstanding Spliff queue would exceed 60 audio files or 8 GiB.")
         if reserved + size > min(shutil.disk_usage(root).free, shutil.disk_usage(incomplete.parent).free):

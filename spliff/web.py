@@ -25,6 +25,8 @@ ASSETS = {"/": ("index.html", "text/html"), "/app.css": ("app.css", "text/css"),
           "/app.js": ("app.js", "text/javascript")}
 
 def serve(db, port):
+    scan_lock = Lock()
+    scan_state = None
     approval_lock = Lock()
     approvals = {}
 
@@ -47,6 +49,25 @@ def serve(db, port):
             if not issued or issued[0] <= monotonic() or issued[1] != selection:
                 raise ValueError("Open the local upgrade review again and choose one of its displayed plans.")
             del approvals[approval]
+
+    def start_scan(folders):
+        nonlocal scan_state
+        roots = sync.selected_folders(folders)
+        with scan_lock:
+            if scan_state and scan_state["current"] is not None:
+                raise ValueError("A folder scan is already running.")
+            sync.remember_folders(db, roots)
+            scan_id = scan_state["id"] + 1 if scan_state else 1
+            scan_state = {"id": scan_id, "completed": 0, "total": len(roots),
+                          "current": str(roots[0]), "failures": []}
+
+        def progress(completed, current, failures):
+            nonlocal scan_state
+            with scan_lock:
+                scan_state = {"id": scan_id, "completed": completed, "total": len(roots),
+                              "current": current, "failures": list(failures)}
+
+        Thread(target=sync.start_many, args=(db, roots, progress), daemon=True).start()
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
@@ -73,6 +94,10 @@ def serve(db, port):
                     self.reply_json(artist_library(db, params.get("artist"), int(params.get("after", 0))))
                 elif url.path == "/api/downloads":
                     self.reply_json({"items": list_downloads(db)})
+                elif url.path == "/api/scan-progress":
+                    with scan_lock:
+                        progress = scan_state
+                    self.reply_json({"scan": progress})
                 elif url.path == "/api/sync":
                     self.reply_json(sync.status(db))
                 elif url.path == "/api/download-review":
@@ -161,9 +186,13 @@ def serve(db, port):
                                                    int(params.get("after", [0])[0])))
                     return
                 if parts == ["api", "scan"]:
-                    if self.body_length(0):
-                        raise ValueError("Unexpected scan data.")
-                    self.pick_and_scan()
+                    length = self.body_length(1024 * 1024)
+                    folders = json.loads(self.rfile.read(length)) if length else self.pick_folders()
+                    if folders is None and not length:
+                        self.reply_json({"cancelled": True})
+                    else:
+                        start_scan(folders)
+                        self.reply_json({"started": True}, 202)
                     return
                 if len(parts) != 4 or parts[:2] != ["api", "tracks"]:
                     self.reply_json({"error": "Unknown action."}, 404)
@@ -219,20 +248,22 @@ def serve(db, port):
                 review_id = stage(db, track_id, candidate)
             self.reply_json({"id": review_id}, 201)
 
-        def pick_and_scan(self):
+        def pick_folders(self):
             picker = shutil.which("osascript")
             if not picker:
                 raise ValueError("The folder picker requires macOS.")
             result = subprocess.run(
-                [picker, "-e", 'POSIX path of (choose folder with prompt "Choose a music folder for Spliff")'],
+                [picker, "-l", "JavaScript", "-e",
+                 'const app = Application.currentApplication(); app.includeStandardAdditions = true; '
+                 'JSON.stringify(app.chooseFolder({withPrompt: "Choose music folders for Spliff", '
+                 'multipleSelectionsAllowed: true}).map(path => path.toString()))'],
                 capture_output=True, text=True, timeout=300,
             )
             if result.returncode:
                 if "(-128)" in result.stderr:
-                    self.reply_json({"cancelled": True})
-                    return
+                    return None
                 raise ValueError("Spliff could not open the macOS folder picker.")
-            self.reply_json(sync.start(db, result.stdout.removesuffix("\n")))
+            return json.loads(result.stdout)
 
         def log_message(self, *_args):
             pass

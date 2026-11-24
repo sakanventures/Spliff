@@ -94,7 +94,7 @@ class Plugin(BasePlugin):
             return
         self.stopped.set()
         try:
-            if self.downloads.allowed:
+            if self.downloads.allowed or self.downloads.recovery:
                 self.downloads.stop()
         except (OSError, ValueError):
             LOG.exception("Could not confirm Spliff transfer shutdown")
@@ -116,6 +116,8 @@ class Plugin(BasePlugin):
             return {"nicotine_version": __version__, "staging": enabled(staging_root())}
         if operation == "queue":
             return self.on_main(self.queue, request)
+        if operation == "authorize_recovery":
+            return self.on_main(self.downloads.recover, request.get("selections"))
         if operation == "stop_downloads":
             return self.on_main(self.downloads.stop)
         if operation == "download_status":

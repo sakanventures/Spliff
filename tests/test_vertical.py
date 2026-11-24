@@ -9,9 +9,9 @@ import tempfile
 import unittest
 from http.server import ThreadingHTTPServer
 from pathlib import Path, PureWindowsPath
-from time import time
 from queue import Queue
 from threading import Thread
+from time import sleep, time
 from types import SimpleNamespace
 from unittest.mock import patch
 from urllib.error import HTTPError
@@ -475,6 +475,41 @@ class VerticalSlice(unittest.TestCase):
         self.assertEqual(self.original.with_suffix(".flac").read_bytes(), b"\0" * len(staged_bytes))
 
     @unittest.skipUnless(sys.platform == "darwin", "Requires exclusive macOS rename")
+    def test_archive_failure_keeps_original_and_rolls_back_replacement(self):
+        indexed, report = self.keep_both_fixture()
+        original_bytes = self.original.read_bytes()
+        move = keep_both.move_exclusive
+
+        def fail_archive(source, destination, **kwargs):
+            if source == self.original.resolve():
+                self.assertTrue(self.original.with_suffix(".flac").exists())
+                raise OSError("Simulated archive failure")
+            return move(source, destination, **kwargs)
+
+        with patch("spliff.keep_both.review_download", return_value=report):
+            plan = keep_both.preview(self.db, self.album_selection, indexed["id"], "replace")
+            with patch("spliff.keep_both.move_exclusive", side_effect=fail_archive):
+                with self.assertRaisesRegex(OSError, "archive failure"):
+                    keep_both.apply(self.db, self.album_selection, indexed["id"], plan["token"], "replace")
+        self.assertEqual(self.original.read_bytes(), original_bytes)
+        self.assertFalse(self.original.with_suffix(".flac").exists())
+        self.assertTrue(Path(report["items"][0]["source"]).exists())
+
+    @unittest.skipUnless(sys.platform == "darwin", "Requires exclusive macOS rename")
+    def test_replacement_preview_rejects_changed_original_and_destination_collision(self):
+        indexed, report = self.keep_both_fixture()
+        existing = self.original.with_suffix(".flac")
+        existing.write_bytes(b"existing file")
+        with patch("spliff.keep_both.review_download", return_value=report):
+            with self.assertRaisesRegex(ValueError, "same name"):
+                keep_both.preview(self.db, self.album_selection, indexed["id"], "replace")
+            self.original.write_bytes(b"modified original")
+            with self.assertRaisesRegex(ValueError, "audio file changed"):
+                keep_both.preview(self.db, self.album_selection, indexed["id"], "replace")
+        self.assertEqual(existing.read_bytes(), b"existing file")
+        self.assertEqual(self.original.read_bytes(), b"modified original")
+
+    @unittest.skipUnless(sys.platform == "darwin", "Requires exclusive macOS rename")
     def test_cleanup_failure_leaves_the_successful_import_in_place(self):
         indexed, report = self.keep_both_fixture()
         selection = self.album_selection
@@ -729,6 +764,26 @@ with patch.object(keep_both, "review_download", return_value=report), \\
                 self.assertTrue(result["protected"])
                 self.assertEqual(self.original.read_bytes(), original_bytes)
                 self.assertEqual(self.candidate.read_bytes(), candidate_bytes)
+                second = self.base / "Another music folder"
+                second.mkdir()
+                shutil.copyfile(self.candidate, second / "Lossless.flac")
+                missing = self.base / "Missing folder"
+                selections = [str(self.root), str(second), str(missing), str(second)]
+                request = Request(base + "/api/scan", data=json.dumps(selections).encode(), headers=headers)
+                with urlopen(request, timeout=5) as reply:
+                    self.assertEqual(reply.status, 202)
+                for _ in range(100):
+                    with urlopen(base + "/api/scan-progress", timeout=5) as reply:
+                        progress = json.load(reply)["scan"]
+                    if progress["current"] is None:
+                        break
+                    sleep(.05)
+                self.assertEqual((progress["completed"], progress["total"]), (3, 3))
+                self.assertEqual([failure["folder"] for failure in progress["failures"]], [str(missing.resolve())])
+                with urlopen(base + "/api/sync", timeout=5) as reply:
+                    self.assertCountEqual(json.load(reply)["folders"], [str(folder.resolve()) for folder in (self.root, second, missing)])
+                with urlopen(base + "/api/tracks?scope=lossless", timeout=5) as reply:
+                    self.assertEqual(json.load(reply)["items"][0]["path"], "Lossless.flac")
 
             finally:
                 server.terminate()
