@@ -14,6 +14,9 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 from .catalog import albums, connect, file_metadata_preference, replacement_preference, stats, tracks
 from . import keep_both, library_import, sync
+from .discogs import release_cover
+from .nicotine_bridge.downloads import selection_parts
+from .nicotine_bridge.wire import staging_root
 from .nicotine import install_plugin, search, transfer_control, transfer_readiness
 from .review import protect, reviews, stage
 from .spectral import analyze_track, analyze_download
@@ -29,6 +32,24 @@ ASSETS.update({
     for subset in ("latin", "latin-ext")
     for weight in (400, 500, 600, 700)
 })
+
+def folder_cover(folder):
+    if not folder.is_dir() or folder.resolve() != folder:
+        return None
+    names = ("cover", "front", "folder", "artwork")
+    images = sorted((path for path in folder.iterdir() if path.suffix.lower() in (".jpg", ".jpeg", ".png")),
+                    key=lambda path: (names.index(path.stem.lower()) if path.stem.lower() in names else len(names),
+                                      path.name.lower()))
+    for path in images:
+        if path.is_symlink() or not path.is_file() or path.stat().st_size > 12 * 1024 * 1024:
+            continue
+        data = path.read_bytes()
+        if data.startswith(b"\xff\xd8\xff"):
+            return data, "image/jpeg"
+        if data.startswith(b"\x89PNG\r\n\x1a\n"):
+            return data, "image/png"
+    return None
+
 
 def serve(db, port):
     scan_lock = Lock()
@@ -114,6 +135,28 @@ def serve(db, port):
                     self.reply_json({"scan": progress})
                 elif url.path == "/api/sync":
                     self.reply_json(sync.status(db))
+                elif url.path == "/api/review-art":
+                    candidate = params.get("candidate")
+                    selection_parts(candidate)
+                    cover = folder_cover(staging_root() / candidate)
+                    if not cover and params.get("original"):
+                        with closing(connect(db)) as connection:
+                            track = connection.execute("SELECT path FROM tracks WHERE id=? AND present=1",
+                                                       (int(params["original"]),)).fetchone()
+                        if track:
+                            folder = Path(track["path"]).parent
+                            cover = folder_cover(folder)
+                            if not cover and folder.name.lower().startswith("disc ") and folder.name[5:].isdigit():
+                                cover = folder_cover(folder.parent)
+                    if cover:
+                        self.reply(*cover)
+                    elif params.get("edition") and (image := release_cover(int(params["edition"]))):
+                        self.send_response(302)
+                        self.send_header("Location", image)
+                        self.send_header("Referrer-Policy", "no-referrer")
+                        self.end_headers()
+                    else:
+                        self.send_error(404)
                 elif url.path == "/api/download-review":
                     original = int(params["original"]) if params.get("original") else None
                     try:
@@ -371,7 +414,7 @@ def serve(db, port):
             self.send_header("Cache-Control", "no-store")
             self.send_header("X-Content-Type-Options", "nosniff")
             self.send_header("Content-Security-Policy",
-                             "default-src 'self'; frame-ancestors 'none'; object-src 'none'")
+                             "default-src 'self'; img-src 'self' https://i.discogs.com; frame-ancestors 'none'; object-src 'none'")
             self.end_headers()
             self.wfile.write(content)
 

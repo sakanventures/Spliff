@@ -1,6 +1,6 @@
 import * as React from "react"
 import { Button } from "./components/button"
-import { Card, CardContent, CardDescription } from "./components/card"
+import { Card, CardContent } from "./components/card"
 
 export function Navigation() {
   return (
@@ -26,39 +26,25 @@ export function Navigation() {
   )
 }
 
-function RecordIllustration() {
-  return (
-    <div className="record-illustration" aria-hidden="true">
-      <div className="record-artwork">
-        <div className="vinyl-disc" />
-        <div className="record-sleeve"><span className="spliff-mark" /></div>
-      </div>
-    </div>
-  )
-}
-
 export function SyncWorkspace() {
   return (
     <>
-      <Card className="sync-hero">
-        <CardContent className="sync-intro">
-          <h1 id="sync-heading">Upgrade your music.</h1>
-          <CardDescription className="sync-description">
-            Choose which folders Spliff scans for lossless upgrades.
-            Review each download before deciding what to keep.
-          </CardDescription>
-          <div className="sync-actions">
-            <Button id="sync-folder" type="button" size="lg">Choose music folders</Button>
-            <Button id="sync-downloads" type="button" size="lg" variant="outline">View downloads</Button>
-          </div>
-        </CardContent>
-        <RecordIllustration />
-      </Card>
+      <header className="sync-intro">
+        <h1 id="sync-heading">Upgrade your music.</h1>
+        <p className="sync-description">
+          Choose which folders Spliff scans for lossless upgrades.
+          Review each download before deciding what to keep.
+        </p>
+      </header>
       <section id="sync-folder-list" aria-labelledby="sync-folders-heading">
         <Card className="sync-library">
           <CardContent className="sync-library-head">
             <h2 id="sync-folders-heading">Music folders</h2>
             <p id="sync-folder-state" role="status">Checking folders…</p>
+          </CardContent>
+          <CardContent className="sync-actions">
+            <Button id="sync-folder" type="button" size="lg">Choose music folders</Button>
+            <Button id="sync-downloads" type="button" size="lg" variant="outline">View downloads</Button>
           </CardContent>
           <ul id="sync-folders" hidden />
           <p id="sync-status" role="status" hidden />

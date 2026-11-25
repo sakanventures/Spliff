@@ -75,6 +75,17 @@ def search_releases(_db, artist, title, limit=5):
     return {"attribution": "Data provided by Discogs.", "items": items}
 
 
+def release_cover(release_id):
+    if not 1 <= release_id < 2**63:
+        raise ValueError("Invalid Discogs release.")
+    images = fetch(f"/releases/{release_id}").get("images") or []
+    for image in sorted(images, key=lambda item: item.get("type") != "primary"):
+        url = image.get("uri150") or image.get("uri") or ""
+        if url.startswith("https://i.discogs.com/") and not any(char.isspace() for char in url):
+            return url
+    return None
+
+
 def release_details(_db, release_id):
     if type(release_id) is not int or not 1 <= release_id < 2**63:
         raise ValueError("Choose a valid Discogs release ID.")

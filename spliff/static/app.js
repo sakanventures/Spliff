@@ -142,6 +142,7 @@ async function loadReviews() {
 }
 
 function view(page) {
+  window.webkit?.messageHandlers?.spliffMac?.postMessage("reviewClosed");
   document.body.dataset.view = page;
   get('advanced').open = false;
   for (const [id, key, panel] of [['sync', 'sync', 'sync-panel'], ['albums', 'albums', 'albums-panel'], ['browse', 'tracks', 'index'],
@@ -320,6 +321,8 @@ get('soulseek-form').addEventListener('submit', async event => {
 });
 
 function showDownloadList() {
+  delete get('inline-options').dataset.key;
+  window.webkit?.messageHandlers?.spliffMac?.postMessage("reviewClosed");
   get('downloads-panel').classList.remove('show-download');
   get('download-back').hidden = true;
 }
@@ -331,12 +334,14 @@ get('download-back').addEventListener('click', () => {
 
 function selectDownload(job, open = false) {
   if (open) {
+    window.webkit?.messageHandlers?.spliffMac?.postMessage('reviewOpen');
     get('action-status').hidden = true;
     get('downloads-panel').classList.add('show-download');
     get('download-back').hidden = false;
     get('download-back').focus();
   }
   if (selectedDownload?.id !== job.id) {
+    delete get('inline-options').dataset.key;
     get('download-spectrum').hidden = true;
     get('download-spectrum').replaceChildren();
     delete get('download-spectrum').dataset.selection;
@@ -346,6 +351,9 @@ function selectDownload(job, open = false) {
     get('download-note').hidden = true;
     get('download-details').hidden = true;
     get('download-details').open = false;
+    for (const id of ['original-fold', 'candidate-fold']) get(id).open = false;
+    get('review-art').hidden = true;
+    get('transfer-label').textContent = '';
     get('download-spectrum-details').open = false;
     get('add-download').hidden = true;
   }
@@ -434,14 +442,44 @@ function showDownload(result, job) {
   };
   if (spectrumDetails.open) spectrumDetails.ontoggle();
   const matched = review.filter(item => item.assessment === 'possible match').length;
-  const count = result.complete + ' of ' + review.length + ' tracks downloaded';
+  const count = result.complete + ' of ' + review.length + (review.length === 1 ? ' track downloaded' : ' tracks downloaded');
   const progress = get('download-progress');
   progress.value = result.complete;
-  progress.hidden = result.complete === review.length;
-  get('download-status').textContent = count + (result.comparison && !result.comparison.album_mismatch ? ' · ' + matched + ' possible matches' : '');
+  progress.max = Math.max(1, review.length);
+  progress.hidden = false;
+  const complete = review.length > 0 && result.complete === review.length;
+  get('transfer-label').textContent = complete ? '● Complete' : 'Downloading';
+  get('candidate-label').textContent = complete ? 'Download ready for review' : 'Downloading tracks';
+  const originals = [...new Map([...review.map(item => item.original).filter(Boolean),
+    ...result.originals_without_match].map(track => [track.id, track])).values()];
+  originals.sort((a, b) => (parseInt(a.disc_number) || 1) - (parseInt(b.disc_number) || 1) ||
+    (parseInt(a.track_number) || 0) - (parseInt(b.track_number) || 0));
+  get('original-list').replaceChildren(...originals.map(track => element('li', track.title || track.path)));
+  get('candidate-list').replaceChildren(...review.map(item => element('li',
+    (item.audio?.title || item.name) + ' · ' + (item.assessment || item.status))));
+  for (const [id, tracks] of [['original-format', originals], ['candidate-format', review.map(item => item.audio)]]) {
+    get(id).textContent = [...new Set(tracks.map(track => track?.codec?.toUpperCase()).filter(Boolean))].join(' / ');
+  }
+  get('original-fold').hidden = !originals.length;
+  const art = get('review-art');
+  const query = new URLSearchParams({candidate: job.id});
+  if (result.comparison) query.set('original', result.comparison.original_track_id);
+  const releases = result.edition_evidence?.releases;
+  if (releases?.length === 1) query.set('edition', releases[0].id);
+  const src = '/api/review-art?' + query;
+  if (art.getAttribute('src') !== src || art.dataset.job !== job.id) {
+    art.dataset.job = job.id;
+    art.hidden = true;
+    art.onload = () => { art.hidden = false; };
+    art.onerror = () => { art.hidden = true; };
+    art.src = src;
+  } else if (art.complete && art.naturalWidth) art.hidden = false;
+  get('download-source').textContent = [review.find(item => item.audio?.artist)?.audio.artist,
+    result.kind === 'album' ? 'Album' : 'Track'].filter(Boolean).join(' · ');
+  get('download-status').textContent = count + (result.comparison && !result.comparison.album_mismatch ? ' · ' + matched + (matched === 1 ? ' possible match' : ' possible matches') : '');
   const candidateAlbum = review.find(item => item.audio?.album)?.audio.album;
   get('download-title').textContent = candidateAlbum || job.title;
-  get('download-comparison').hidden = result.complete !== review.length;
+  get('download-comparison').hidden = false;
   const kept = result.kept_both;
   get('download-original').textContent = kept ? ({replace: 'FLACs in use', keep: 'Both versions saved', import: 'Added to library'}[kept.mode]) :
     result.comparison?.album || downloadOriginal?.title || 'No album selected';
@@ -453,11 +491,17 @@ function showDownload(result, job) {
     review.some(item => ['possible match', 'check track order', 'check featured credits'].includes(item.assessment) &&
       item.audio?.quality === 'lossless' &&
       item.original?.quality === 'lossy' && !item.original.protected);
-  get('keep-both').hidden = !eligible;
+  get('review-choices').hidden = !eligible;
   get('add-download').hidden = Boolean(kept) || eligible || !review.length || result.complete !== review.length ||
     !review.every(item => item.audio?.quality === 'lossless');
-  get('keep-both').textContent = 'Choose upgrade';
   keptComparison = eligible ? {candidate: job.id, original: result.comparison.original_track_id} : null;
+  const inline = get('inline-options');
+  const planKey = eligible ? JSON.stringify(keptComparison) : '';
+  if (inline.dataset.key !== planKey) {
+    inline.dataset.key = planKey;
+    inline.replaceChildren();
+    if (eligible) showUpgradeOptions(keptComparison, false, inline);
+  }
   const edition = result.edition_evidence;
   const editionNote = get('download-edition');
   editionNote.hidden = !edition;
@@ -570,35 +614,37 @@ function completionText(result) {
   return [counts + '.', staging, recovery].filter(Boolean).join(' ');
 }
 
-async function showUpgradeOptions(comparison, refresh = false) {
+async function showUpgradeOptions(comparison, refresh = false, inline = null) {
   if (!comparison || keepDialog.open) return;
   const request = ++upgradeOptionsRequest;
-  const options = get('upgrade-options');
+  const options = inline || get('upgrade-options');
+  const status = inline ? get('inline-choice-status') : keepStatus;
+  const current = () => request === upgradeOptionsRequest && (inline ? inline.dataset.key === JSON.stringify(comparison) : keepDialog.open);
   options.replaceChildren();
-  keepStatus.textContent = 'Checking audio and destinations…';
-  keepDialog.showModal();
+  status.textContent = 'Checking audio and destinations…';
+  if (!inline) keepDialog.showModal();
   const query = new URLSearchParams({...comparison, refresh: refresh || refreshUpgradePlans ? '1' : '0'});
   try {
     const result = await action('/api/upgrade-options?' + query);
-    if (!keepDialog.open || request !== upgradeOptionsRequest) return;
+    if (!current()) return;
     refreshUpgradePlans = false;
-    keepStatus.textContent = '';
+    status.textContent = '';
     for (const [mode, label] of [['keep', 'Keep both'], ['replace', 'Replace']]) {
       const plan = result.options[mode];
       const card = element('section', '', 'upgrade-option');
-      card.append(element('h3', label));
+      if (!plan) card.append(element('h3', label));
       if (!plan) {
         card.append(element('p', result.blocked[mode], 'muted'));
         options.append(card);
         continue;
       }
-      card.append(element('p', `${plan.count} upgrades → ${plan.destination}`),
+      card.append(element('p', `${plan.count} ${plan.count === 1 ? 'upgrade' : 'upgrades'} → ${plan.destination}`),
         element('p', `Originals → ${plan.archive}`));
       if (plan.preserved.length || plan.skipped.length) {
         card.append(element('p', `${plan.preserved.length} originals stay in place · ${plan.skipped.length} downloads skipped`, 'muted'));
       }
       const details = element('details');
-      details.open = true;
+      details.open = !inline;
       details.append(element('summary', 'Exact files and audio review'));
       const files = element('ul');
       for (const file of plan.files) {
@@ -610,17 +656,20 @@ async function showUpgradeOptions(comparison, refresh = false) {
       details.append(files, element('p', plan.audio_review, 'muted'));
       const button = element('button', label);
       button.addEventListener('click', event => {
-        if (event.isTrusted) applyUpgrade(comparison, mode, plan);
+        if (event.isTrusted) applyUpgrade(comparison, mode, plan, status, options);
       });
-      card.append(details, button);
+      card.prepend(button);
+      card.append(details);
       options.append(card);
+
     }
   } catch (error) {
-    if (request === upgradeOptionsRequest) keepStatus.textContent = error.message;
+    if (current()) {
+      status.textContent = error.message;
+      if (inline) delete inline.dataset.key;
+    }
   }
 }
-
-get('keep-both').addEventListener('click', () => showUpgradeOptions(keptComparison));
 
 const reviewLink = new URLSearchParams(location.search);
 if (reviewLink.has('review_candidate') && reviewLink.has('review_original')) {
@@ -631,12 +680,12 @@ get('cancel-keep-both').addEventListener('click', () => keepDialog.close());
 keepDialog.addEventListener('close', () => { upgradeOptionsRequest++; });
 keepDialog.addEventListener('cancel', event => { if (applyingUpgrade) event.preventDefault(); });
 
-async function applyUpgrade(comparison, mode, plan) {
+async function applyUpgrade(comparison, mode, plan, status, options) {
   if (applyingUpgrade) return;
   applyingUpgrade = true;
   get('cancel-keep-both').disabled = true;
-  get('upgrade-options').querySelectorAll('button').forEach(button => { button.disabled = true; });
-  keepStatus.textContent = 'Verifying and installing upgrades…';
+  options.querySelectorAll('button').forEach(button => { button.disabled = true; });
+  status.textContent = 'Verifying and installing upgrades…';
   try {
     const params = new URLSearchParams({...comparison, mode, token: plan.token});
     const result = await action('/api/keep-both?' + params, '', {'X-Spliff-Approval': plan.approval});
@@ -650,7 +699,8 @@ async function applyUpgrade(comparison, mode, plan) {
     notice(completionText(result));
   } catch (error) {
     refreshUpgradePlans = true;
-    keepStatus.textContent = error.message + ' Reopen the options to review the current plan.';
+    status.textContent = error.message + ' Review the updated plans before choosing again.';
+    delete get('inline-options').dataset.key;
   } finally {
     applyingUpgrade = false;
     get('cancel-keep-both').disabled = false;
@@ -1147,6 +1197,9 @@ async function showImport(candidate) {
     updateCategory();
     importStatus.textContent = '';
     importForm.hidden = false;
+    if (importEditions.length <= 1 && importForm.checkValidity()) {
+      importForm.requestSubmit(importForm.querySelector('button[type="submit"]'));
+    }
   } catch (error) {
     if (importDialog.open && importCandidate === candidate) importStatus.textContent = error.message;
   }

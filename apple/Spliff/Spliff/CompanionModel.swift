@@ -15,6 +15,7 @@ struct CommandResult: Sendable {
 
 @MainActor
 final class CompanionModel: ObservableObject {
+    @Published var reviewOpen = false
     @Published var settingsOpen = false
     @Published var dashboardReady = false
     @Published var connected = false

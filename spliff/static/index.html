@@ -22,7 +22,7 @@
     <p id="action-status" class="message" role="status" hidden></p>
     <section id="sync-panel" aria-labelledby="sync-heading">
       <!-- generated: sync workspace -->
-<div data-slot="card" class="flex flex-col gap-6 rounded-xl border bg-card py-6 text-card-foreground shadow-sm sync-hero"><div data-slot="card-content" class="px-6 sync-intro"><h1 id="sync-heading">Upgrade your music.</h1><div data-slot="card-description" class="text-sm text-muted-foreground sync-description">Choose which folders Spliff scans for lossless upgrades. Review each download before deciding what to keep.</div><div class="sync-actions"><button data-slot="button" data-variant="default" data-size="lg" class="inline-flex shrink-0 items-center justify-center gap-2 text-sm font-medium whitespace-nowrap transition-all outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 disabled:pointer-events-none disabled:opacity-50 aria-invalid:border-destructive aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 [&amp;_svg]:pointer-events-none [&amp;_svg]:shrink-0 [&amp;_svg:not([class*=&#x27;size-&#x27;])]:size-4 bg-primary text-primary-foreground hover:bg-primary/90 h-10 rounded-md px-6 has-[&gt;svg]:px-4" id="sync-folder" type="button">Choose music folders</button><button data-slot="button" data-variant="outline" data-size="lg" class="inline-flex shrink-0 items-center justify-center gap-2 text-sm font-medium whitespace-nowrap transition-all outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 disabled:pointer-events-none disabled:opacity-50 aria-invalid:border-destructive aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 [&amp;_svg]:pointer-events-none [&amp;_svg]:shrink-0 [&amp;_svg:not([class*=&#x27;size-&#x27;])]:size-4 border bg-background shadow-xs hover:bg-accent hover:text-accent-foreground dark:border-input dark:bg-input/30 dark:hover:bg-input/50 h-10 rounded-md px-6 has-[&gt;svg]:px-4" id="sync-downloads" type="button">View downloads</button></div></div><div class="record-illustration" aria-hidden="true"><div class="record-artwork"><div class="vinyl-disc"></div><div class="record-sleeve"><span class="spliff-mark"></span></div></div></div></div><section id="sync-folder-list" aria-labelledby="sync-folders-heading"><div data-slot="card" class="flex flex-col gap-6 rounded-xl border bg-card py-6 text-card-foreground shadow-sm sync-library"><div data-slot="card-content" class="px-6 sync-library-head"><h2 id="sync-folders-heading">Music folders</h2><p id="sync-folder-state" role="status">Checking folders…</p></div><ul id="sync-folders" hidden=""></ul><p id="sync-status" role="status" hidden=""></p><details id="sync-details" hidden=""><summary>Sync details</summary><ul id="sync-items"></ul></details></div></section>
+<header class="sync-intro"><h1 id="sync-heading">Upgrade your music.</h1><p class="sync-description">Choose which folders Spliff scans for lossless upgrades. Review each download before deciding what to keep.</p></header><section id="sync-folder-list" aria-labelledby="sync-folders-heading"><div data-slot="card" class="flex flex-col gap-6 rounded-xl border bg-card py-6 text-card-foreground shadow-sm sync-library"><div data-slot="card-content" class="px-6 sync-library-head"><h2 id="sync-folders-heading">Music folders</h2><p id="sync-folder-state" role="status">Checking folders…</p></div><div data-slot="card-content" class="px-6 sync-actions"><button data-slot="button" data-variant="default" data-size="lg" class="inline-flex shrink-0 items-center justify-center gap-2 text-sm font-medium whitespace-nowrap transition-all outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 disabled:pointer-events-none disabled:opacity-50 aria-invalid:border-destructive aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 [&amp;_svg]:pointer-events-none [&amp;_svg]:shrink-0 [&amp;_svg:not([class*=&#x27;size-&#x27;])]:size-4 bg-primary text-primary-foreground hover:bg-primary/90 h-10 rounded-md px-6 has-[&gt;svg]:px-4" id="sync-folder" type="button">Choose music folders</button><button data-slot="button" data-variant="outline" data-size="lg" class="inline-flex shrink-0 items-center justify-center gap-2 text-sm font-medium whitespace-nowrap transition-all outline-none focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 disabled:pointer-events-none disabled:opacity-50 aria-invalid:border-destructive aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 [&amp;_svg]:pointer-events-none [&amp;_svg]:shrink-0 [&amp;_svg:not([class*=&#x27;size-&#x27;])]:size-4 border bg-background shadow-xs hover:bg-accent hover:text-accent-foreground dark:border-input dark:bg-input/30 dark:hover:bg-input/50 h-10 rounded-md px-6 has-[&gt;svg]:px-4" id="sync-downloads" type="button">View downloads</button></div><ul id="sync-folders" hidden=""></ul><p id="sync-status" role="status" hidden=""></p><details id="sync-details" hidden=""><summary>Sync details</summary><ul id="sync-items"></ul></details></div></section>
 <!-- /generated: sync workspace -->
     </section>
     <section id="albums-panel" aria-label="Albums" hidden>
@@ -94,7 +94,7 @@
         <aside class="download-sidebar" aria-label="Download list">
           <div class="download-sidebar-heading">
             <h2>Downloads</h2>
-            <details id="add-download">
+            <details id="manual-download">
               <summary>Manual download</summary>
               <form id="queue-form">
                 <label>Candidate ID<input id="download-code" required maxlength="48"
@@ -110,23 +110,24 @@
           <button id="download-back" class="back-link" type="button" hidden>← All downloads</button>
           <div id="download-heading" hidden>
             <div class="download-title">
-              <div><h2 id="download-title"></h2><p id="download-source" class="muted"></p></div>
-              <button id="reload-download" type="button">Refresh</button>
+              <span class="review-cover" aria-hidden="true">♫<img id="review-art" alt="" hidden></span><div class="review-name"><h2 id="download-title"></h2><p id="download-source" class="muted"></p></div>
+              <strong id="transfer-label"></strong>
             </div>
             <progress id="download-progress" max="1" value="0" aria-label="Tracks downloaded"></progress>
           </div>
           <p id="download-status" role="status"></p>
           <div id="download-comparison" class="download-comparison" hidden>
-            <div><small>Compare with your library</small><strong id="download-original"></strong></div>
+            <details class="track-fold" id="original-fold"><summary>Original in your library <small id="original-format"></small></summary><strong id="download-original"></strong><ol id="original-list"></ol></details>
+            <details class="track-fold" id="candidate-fold"><summary><span id="candidate-label">Download ready for review</span> <small id="candidate-format"></small></summary><ol id="candidate-list"></ol></details>
             <div class="comparison-actions">
               <button id="choose-original" type="button">Choose comparison album</button>
-              <button id="keep-both" class="primary" type="button" hidden>Use FLACs</button>
+              <section id="review-choices" hidden><h3>Your choice on Mac</h3><p id="inline-choice-status" role="status"></p><div id="inline-options"></div></section>
               <button id="add-download" class="primary" type="button" hidden>Add to library</button>
             </div>
           </div>
           <p id="download-note" class="muted" hidden></p>
           <details id="download-details" hidden>
-            <summary>Advanced inspection</summary>
+            <summary>Advanced inspection</summary><button id="reload-download" type="button">Refresh</button>
             <p id="download-edition" class="muted" hidden></p>
             <div id="download-comparison-control"></div>
             <div id="download-report"></div>

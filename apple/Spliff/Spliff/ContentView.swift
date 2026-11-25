@@ -19,13 +19,14 @@ struct ContentView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
+        .navigationTitle(model.reviewOpen ? "Download Review" : "Spliff")
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
-                Button("Settings", systemImage: "gearshape") { model.settingsOpen = true }
+                Button("Settings") { model.settingsOpen = true }
                     .help("Settings")
             }
         }
-        .sheet(isPresented: $model.settingsOpen) {
+        .inspector(isPresented: $model.settingsOpen) {
             SpliffSettings()
                 .environmentObject(model)
         }
@@ -53,15 +54,17 @@ struct ContentView: View {
 
 private struct SpliffSettings: View {
     @EnvironmentObject var model: CompanionModel
-    @Environment(\.dismiss) private var dismiss
+
     @StateObject private var preference = LibraryPreference(
         path: "/api/replacement-preference", key: "destination", initial: "trash")
     @StateObject private var metadata = LibraryPreference(
         path: "/api/file-metadata-preference", key: "mode", initial: "preserve")
 
     var body: some View {
-        ScrollView { settings }
-            .frame(width: 480)
+        ScrollView {
+            settings
+        }
+        .inspectorColumnWidth(min: 300, ideal: 360, max: 480)
     }
 
     private var settings: some View {
@@ -69,7 +72,7 @@ private struct SpliffSettings: View {
             HStack {
                 Text("Settings").font(.title2.bold())
                 Spacer()
-                Button("Done") { dismiss() }.keyboardShortcut(.cancelAction)
+                Button("Done") { model.settingsOpen = false }.keyboardShortcut(.cancelAction)
             }
             if model.dashboardReady {
                 TransferSettings(base: model.dashboardURL)
@@ -332,7 +335,12 @@ struct DashboardView: NSViewRepresentable {
                   message.frameInfo.securityOrigin.protocol == url.scheme,
                   message.frameInfo.securityOrigin.host == url.host,
                   message.frameInfo.securityOrigin.port == url.port,
-                  message.body as? String == "chooseMusic",
+                  let command = message.body as? String else { return }
+            if command == "reviewOpen" || command == "reviewClosed" {
+                model.reviewOpen = command == "reviewOpen"
+                return
+            }
+            guard command == "chooseMusic",
                   !model.busy, !model.connecting, model.runtimeAvailable else { return }
             model.chooseMusic()
         }
