@@ -144,13 +144,12 @@ async function loadReviews() {
 function view(page) {
   window.webkit?.messageHandlers?.spliffMac?.postMessage("reviewClosed");
   document.body.dataset.view = page;
-  get('advanced').open = false;
   for (const [id, key, panel] of [['sync', 'sync', 'sync-panel'], ['albums', 'albums', 'albums-panel'], ['browse', 'tracks', 'index'],
     ['staged', 'reviews', 'review-panel'], ['downloads', 'downloads', 'downloads-panel']]) {
     get(id).setAttribute('aria-pressed', page === key);
     get(panel).hidden = page !== key;
   }
-  if (page === 'sync') loadSync();
+  if (page === 'sync') { loadSync(); loadSettings(); }
   else clearTimeout(syncTimer);
   if (page === 'albums' && !get('album-library').hidden) loadAlbums();
   if (page === 'tracks') { refreshSummary(); loadTracks(); }
@@ -205,7 +204,7 @@ async function loadAlbums() {
       if (items.some(other => other.id !== album.id && other.album.toLowerCase() === album.album.toLowerCase())) {
         title.append(element('small', [album.root, album.folder].filter(Boolean).join('/'), 'muted'));
       }
-      const button = element('button', choosingDownloadOriginal ? 'Compare' : 'Find FLACs');
+      const button = element('button', choosingDownloadOriginal ? 'Compare' : 'Upgrade');
       button.setAttribute('aria-label', button.textContent + ' for ' + album.album);
       button.addEventListener('click', () => {
         if (choosingDownloadOriginal) {
@@ -243,7 +242,8 @@ function showAlbumLibrary(comparing = false) {
   currentAlbum = null;
   sourceRequest++;
   choosingDownloadOriginal = comparing;
-  get('albums-heading').textContent = comparing ? 'Which album should Spliff compare?' : companion ? 'Upgrade an album' : 'What album do you want to upgrade?';
+  get('albums-heading').textContent = comparing ? 'Which album should Spliff compare?' : 'Recommended';
+  get('recommended-description').hidden = comparing;
   get('album-library').hidden = false;
   get('album-search').hidden = true;
   view('albums');
@@ -729,7 +729,7 @@ get('staged').addEventListener('click', () => view('reviews'));
 get('downloads').addEventListener('click', () => view('downloads'));
 get('albums').addEventListener('click', () => showAlbumLibrary());
 
-const settingsDialog = get('settings-dialog');
+const settingsPanel = get('sync-panel');
 const settingsForm = get('replacement-settings');
 const replacementSelect = get('replace-destination');
 const metadataSelect = get('file-metadata');
@@ -745,11 +745,11 @@ let transferBusy = false;
 let transferRequest = 0;
 
 async function refreshTransferSettings() {
-  if (!settingsDialog.open || transferBusy) return;
+  if (settingsPanel.hidden || transferBusy) return;
   const request = ++transferRequest;
   try {
     const status = await api('/api/transfer-readiness');
-    if (request !== transferRequest || !settingsDialog.open) return;
+    if (request !== transferRequest || settingsPanel.hidden) return;
     transferToggle.checked = status.permission === 'on';
     transferToggle.disabled = status.permission !== 'on' &&
       ['bridge_unavailable', 'bridge_update_required'].includes(status.code);
@@ -788,10 +788,8 @@ transferToggle.addEventListener('change', () => changeTransferSettings(
 installBridge.addEventListener('click', () => changeTransferSettings('/api/install-nicotine-bridge'));
 setInterval(refreshTransferSettings, 3000);
 
-get('open-settings').addEventListener('click', async () => {
-  settingsDialog.showModal();
+async function loadSettings() {
   refreshTransferSettings();
-  get('advanced').open = false;
   replacementSelect.disabled = metadataSelect.disabled = saveSettings.disabled = true;
   settingsStatus.textContent = 'Loading settings…';
   try {
@@ -805,8 +803,7 @@ get('open-settings').addEventListener('click', async () => {
   } catch (error) {
     settingsStatus.textContent = error.message;
   }
-});
-get('close-settings').addEventListener('click', () => settingsDialog.close());
+}
 settingsForm.addEventListener('submit', async event => {
   event.preventDefault();
   replacementSelect.disabled = metadataSelect.disabled = saveSettings.disabled = true;
@@ -1023,7 +1020,6 @@ async function loadSync() {
   }
 }
 get('sync').addEventListener('click', () => view('sync'));
-get('sync-downloads').addEventListener('click', () => view('downloads'));
 get('sync-folder').addEventListener('click', scanMusic);
 get('add-library').addEventListener('click', scanMusic);
 const companion = Boolean(window.webkit?.messageHandlers?.spliffMac);
@@ -1031,11 +1027,21 @@ if (companion) {
   document.documentElement.classList.add('companion');
   get('browse').textContent = 'Find individual tracks';
   get('staged').textContent = 'Saved file comparisons';
-  get('albums-heading').textContent = 'Upgrade an album';
-  get('open-settings').hidden = true;
 }
 get('download-comparison-control').append(get('choose-original'));
-view('sync');
+const workspaceMode = get('workspace-mode');
+workspaceMode.value = localStorage.getItem('spliff-workspace-mode') === 'advanced' ? 'advanced' : 'simple';
+function updateWorkspaceMode() {
+  get('advanced').hidden = workspaceMode.value !== 'advanced';
+  document.documentElement.classList.toggle('advanced-mode', workspaceMode.value === 'advanced');
+}
+workspaceMode.addEventListener('change', () => {
+  localStorage.setItem('spliff-workspace-mode', workspaceMode.value);
+  updateWorkspaceMode();
+});
+updateWorkspaceMode();
+if (filePreview) view('sync');
+else view('albums');
 if (filePreview) {
   document.documentElement.classList.add('file-preview');
   get('workspace-location').textContent = 'File preview';
@@ -1299,4 +1305,4 @@ function showImportPreview(plan) {
 
 if (reviewLink.has('import_candidate')) showImport(reviewLink.get('import_candidate'));
 
-if (!filePreview && new URLSearchParams(location.search).get('settings') === '1') get('open-settings').click();
+if (!filePreview && new URLSearchParams(location.search).get('settings') === '1') view('sync');

@@ -11,6 +11,7 @@ struct SpliffApp: App {
                 .frame(minWidth: 760, minHeight: 540)
                 .task { await companion.refresh() }
         }
+        .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 1100, height: 760)
         MenuBarExtra("Spliff", systemImage: "waveform") {
             CompanionMenu().environmentObject(companion)

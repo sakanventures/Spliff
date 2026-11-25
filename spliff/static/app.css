@@ -415,3 +415,19 @@ body:has(#scan-footer:not([hidden])) { padding-bottom: 140px; }
 #inline-options .upgrade-option button { width: 100%; font-weight: 650; }
 #inline-options .upgrade-option p, #inline-options summary { font-size: .85rem; margin-top: 6px; }
 #inline-choice-status:empty { display: none; }
+
+main, .companion main,
+.companion:has(#downloads-panel.show-download:not([hidden])) main {
+  width: 100%;
+  padding-inline: clamp(18px, 3vw, 52px);
+}
+.companion main { padding-top: 42px; }
+.workspace-nav { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.workspace-nav #sync { margin-inline-start: auto; }
+.workspace-nav #advanced { display: flex; gap: 4px; margin-left: 0; }
+.album-list:not(:empty) { background: transparent; border: 0; border-radius: 0; border-block: 1px solid var(--edge); }
+.companion .album-list li { padding-inline: 0; }
+.companion .show-download .download-detail { background: transparent; border-radius: 0; padding-inline: 0; }
+.settings-options { display: grid; gap: 20px; margin-block: 24px; }
+.settings-options form { display: flex; flex-wrap: wrap; align-items: end; gap: 16px; }
+html:not(.advanced-mode) #manual-download { display: none; }

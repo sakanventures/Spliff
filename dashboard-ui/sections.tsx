@@ -6,22 +6,14 @@ export function Navigation() {
   return (
     <nav className="workspace-nav" aria-label="Spliff views">
       <div className="workspace-views">
-        <Button id="sync" type="button" variant="ghost" aria-pressed="true">
-          Sync
-        </Button>
-        <Button id="downloads" type="button" variant="ghost" aria-pressed="false">
-          Downloads
-        </Button>
+        <Button id="albums" type="button" variant="ghost" aria-pressed="true">Recommended</Button>
+        <Button id="downloads" type="button" variant="ghost" aria-pressed="false">Activity</Button>
       </div>
-      <details id="advanced">
-        <summary>Advanced</summary>
-        <div className="advanced-menu">
-          <Button id="albums" type="button" variant="ghost" aria-pressed="false">Find albums manually</Button>
-          <Button id="browse" type="button" variant="ghost" aria-pressed="false">Track index</Button>
-          <Button id="staged" type="button" variant="ghost" aria-pressed="false">Staged reviews</Button>
-          <Button id="open-settings" type="button" variant="ghost">Settings</Button>
-        </div>
-      </details>
+      <div id="advanced" hidden>
+        <Button id="browse" type="button" variant="ghost" aria-pressed="false">Track index</Button>
+        <Button id="staged" type="button" variant="ghost" aria-pressed="false">Saved reviews</Button>
+      </div>
+      <Button id="sync" type="button" variant="ghost" aria-pressed="false">Settings</Button>
     </nav>
   )
 }
@@ -30,10 +22,9 @@ export function SyncWorkspace() {
   return (
     <>
       <header className="sync-intro">
-        <h1 id="sync-heading">Upgrade your music.</h1>
+        <h1 id="sync-heading">Settings</h1>
         <p className="sync-description">
           Choose which folders Spliff scans for lossless upgrades.
-          Review each download before deciding what to keep.
         </p>
       </header>
       <section id="sync-folder-list" aria-labelledby="sync-folders-heading">
@@ -44,7 +35,6 @@ export function SyncWorkspace() {
           </CardContent>
           <CardContent className="sync-actions">
             <Button id="sync-folder" type="button" size="lg">Choose music folders</Button>
-            <Button id="sync-downloads" type="button" size="lg" variant="outline">View downloads</Button>
           </CardContent>
           <ul id="sync-folders" hidden />
           <p id="sync-status" role="status" hidden />

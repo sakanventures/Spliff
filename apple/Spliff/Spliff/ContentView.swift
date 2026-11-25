@@ -19,13 +19,7 @@ struct ContentView: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
         }
-        .navigationTitle(model.reviewOpen ? "Download Review" : "Spliff")
-        .toolbar {
-            ToolbarItem(placement: .primaryAction) {
-                Button("Settings") { model.settingsOpen = true }
-                    .help("Settings")
-            }
-        }
+        .background(Color(red: 241 / 255, green: 229 / 255, blue: 210 / 255).ignoresSafeArea())
         .inspector(isPresented: $model.settingsOpen) {
             SpliffSettings()
                 .environmentObject(model)
