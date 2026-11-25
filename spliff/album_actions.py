@@ -1,5 +1,8 @@
 """Expiring, scoped MCP reviews backed by Spliff's existing file transactions."""
 import json
+import os
+import re
+import stat
 import sqlite3
 from contextlib import closing
 from pathlib import Path
@@ -60,6 +63,8 @@ def preview(db, candidate_id, mode, original_track_id=None, library_root=None, o
     if mode == "keep":
         imported, snapshot = prepare_import(db, candidate_id, original_track_id, library_root)
         reviewed = library_import.preview(imported)
+        for file, pair in zip(reviewed["files"], imported["pairs"]):
+            file["source"] = pair["flac"]
         plan = {"import": imported, "original": snapshot}
     elif mode == "replace" and original_track_id is not None and library_root is None:
         reviewed = keep_both.preview(db, candidate_id, original_track_id, mode, strict=True, overrides=overrides)
@@ -72,12 +77,65 @@ def preview(db, candidate_id, mode, original_track_id=None, library_root=None, o
     review.update(plan_id=plan_id, candidate_id=candidate_id, original_track_id=original_track_id,
                   mode=mode, expires_at=expires, override_track_ids=overrides)
     with closing(connect(db)) as connection, connection:
-        connection.execute("DELETE FROM mcp_album_plans WHERE expires <= ?", (int(time()),))
         connection.execute("INSERT INTO mcp_album_plans VALUES (?,?,?,?,?,?,?)",
                            (plan_id, candidate_id, original_track_id, mode, expires,
                             json.dumps(plan), json.dumps(review)))
     return review
 
+
+def load_review(db, plan_id):
+    if not isinstance(plan_id, str) or not re.fullmatch(r"[a-f0-9]{32}", plan_id):
+        raise ValueError("Choose a reviewed action plan.")
+    with closing(connect(db)) as connection:
+        row = connection.execute("SELECT * FROM mcp_album_plans WHERE id=?", (plan_id,)).fetchone()
+    if not row or row["expires"] <= time():
+        raise ValueError("This action plan expired. Ask Spliff to review the album again.")
+    return row
+
+
+def local_review(db, plan_id):
+    row = load_review(db, plan_id)
+    return json.loads(row["review"]), keep_both.plan_token(dict(row))
+
+
+def recovery_paths(db, candidate_id):
+    with closing(connect(db)) as connection:
+        row = connection.execute("SELECT result FROM upgrade_results WHERE candidate=?", (candidate_id,)).fetchone()
+        plans = connection.execute("SELECT plan,review,mode FROM mcp_album_plans WHERE candidate=?",
+                                   (candidate_id,)).fetchall()
+    if row:
+        path = json.loads(row["result"]).get("recovery_path")
+        if path:
+            yield Path(path)
+    for saved in plans:
+        if saved["mode"] == "keep":
+            yield Path(json.loads(saved["plan"])["import"]["work"])
+        else:
+            yield Path(json.loads(saved["review"])["destination"]) / keep_both.WORK_DIR
+
+
+def inspect_recovery(db, candidate_id):
+    selection_parts(candidate_id)
+    journals = []
+    for work in dict.fromkeys(recovery_paths(db, candidate_id)):
+        try:
+            with keep_both.open_directory(work, {}) as directory:
+                fd = os.open("plan.json", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+                with os.fdopen(fd, "rb") as stream:
+                    info = os.fstat(stream.fileno())
+                    if not stat.S_ISREG(info.st_mode) or info.st_size > 1024 * 1024:
+                        continue
+                    manifest = json.loads(stream.read(1024 * 1024 + 1))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(manifest, dict) or manifest.get("candidate") != candidate_id:
+            continue
+        entries = manifest.get("pairs", manifest.get("files", []))
+        keys = ("mp3", "flac", "installed", "recovery", "install", "original", "archive", "recover_download")
+        files = [{key: entry[key] for key in keys if isinstance(entry.get(key), str)}
+                 for entry in entries if isinstance(entry, dict)] if isinstance(entries, list) else []
+        journals.append({"journal": str(work / "plan.json"), "mode": manifest.get("mode"), "files": files})
+    return {"candidate_id": candidate_id, "journals": journals}
 
 def status(db, candidate_id):
     selection_parts(candidate_id)
@@ -102,7 +160,7 @@ def status(db, candidate_id):
     return {"candidate_id": candidate_id, "status": status_name, **result}
 
 
-def apply(db, candidate_id, mode, plan_id, *, confirm, original_track_id=None):
+def apply(db, candidate_id, mode, plan_id, *, confirm, original_track_id=None, review_digest=None):
     selection_parts(candidate_id)
     if original_track_id is not None and (type(original_track_id) is not int or not 0 < original_track_id < 2**63):
         raise ValueError("Choose an indexed original release.")
@@ -117,16 +175,24 @@ def apply(db, candidate_id, mode, plan_id, *, confirm, original_track_id=None):
         raise ValueError(f'Inspect the recovery path before retrying: {current["recovery_path"]}')
     if current["status"] != "no_committed_action":
         raise ValueError("This download already has a committed library action.")
-    with closing(connect(db)) as connection:
-        row = connection.execute("SELECT * FROM mcp_album_plans WHERE id=?", (plan_id,)).fetchone()
-    if (not row or row["expires"] <= time()
-            or (row["candidate"], row["mode"], row["original_id"]) != (candidate_id, mode, original_track_id)):
-        raise ValueError("The action plan expired or does not match this request. Review both options again.")
+    row = load_review(db, plan_id)
+    if (row["candidate"], row["mode"], row["original_id"]) != (candidate_id, mode, original_track_id):
+        raise ValueError("The action plan does not match this request. Review both options again.")
+    if review_digest is not None and keep_both.plan_token(dict(row)) != review_digest:
+        raise ValueError("The local review changed. Open a new review before approving.")
     review = json.loads(row["review"])
+    with closing(connect(db)) as connection:
+        if connection.execute("SELECT 1 FROM mcp_album_authorizations WHERE plan_id=?", (plan_id,)).fetchone():
+            raise ValueError("That authorization was already used. Review the album again.")
     if not confirm(review):
         raise ValueError("The host did not authorize this reviewed action. No library files were changed.")
     if row["expires"] <= time():
         raise ValueError("The action plan expired during confirmation. Review the options again.")
+    with closing(connect(db)) as connection, connection:
+        inserted = connection.execute(
+            "INSERT OR IGNORE INTO mcp_album_authorizations(plan_id) VALUES (?)", (plan_id,)).rowcount
+        if not inserted:
+            raise ValueError("That authorization was already used. Review the album again.")
     plan = json.loads(row["plan"])
     if mode == "keep":
         refreshed, snapshot = prepare_import(db, candidate_id, original_track_id, plan["import"]["root"])

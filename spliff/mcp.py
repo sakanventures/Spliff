@@ -22,9 +22,13 @@ from .artist import library as artist_library, upgrades as artist_upgrades, inde
 ALBUM_CHOICE = "Keep both versions or replace the matched originals?"
 
 
-def review_for_chat(db, candidate_id, original_track_id=None, *, dashboard_port=8765, host_confirmation=False):
+def local_approval_url(port, plan_id):
+    return f"http://127.0.0.1:{port}/album-approval?" + urlencode({"plan": plan_id})
+
+
+def review_for_chat(db, candidate_id, original_track_id=None, *, dashboard_port=8765, host_confirmation=None):
     result = review_download(db, candidate_id, original_track_id)
-    if host_confirmation and result["items"] and result["complete"] == len(result["items"]) and not result["kept_both"]:
+    if host_confirmation is not None and result["items"] and result["complete"] == len(result["items"]) and not result["kept_both"]:
         original = result["comparison"]["original_track_id"] if result["comparison"] else None
         options, blocked, diagnostics = {}, {}, {}
         modes = ("keep", "replace") if original else ("keep",)
@@ -38,6 +42,13 @@ def review_for_chat(db, candidate_id, original_track_id=None, *, dashboard_port=
         result["album_decision"] = {"question": ALBUM_CHOICE if original else "Add this release to the library?",
                                     "options": options, "blocked": blocked, "original_track_id": original,
                                     "advanced_diagnostics": diagnostics}
+        result["album_decision"]["execution"] = "host_confirmation" if host_confirmation else "local_approval"
+        if not host_confirmation:
+            for option in options.values():
+                option["approval_url"] = local_approval_url(dashboard_port, option["plan_id"])
+            result["album_decision"]["authorization"] = (
+                "Give the user the link for their selected plan. Open it on the Mac running Spliff. "
+                "Approving on that page executes the exact reviewed plan. Then read get_album_action_status.")
         result["review_summary"] = {
             "release": result["comparison"]["album"] if original else None,
             "existing_formats": quality_counts([*result["originals_without_match"],
@@ -126,12 +137,28 @@ def authorize_nicotine_retry(db, candidate_id):
                                    "Check nicotine_transfer_status first if their state has changed."}
 
 
-def confirm_album_action(review, incoming, parent_id):
+def form_method(version, capabilities):
+    if not isinstance(capabilities, dict):
+        return None
+    extensions = capabilities.get("extensions")
+    openai = extensions.get("openai/elicitation") if isinstance(extensions, dict) else None
+    if version in {"2025-06-18", "2025-11-25"} and isinstance(openai, dict) and isinstance(openai.get("form"), dict):
+        return "openai/elicitation/create"
+    core = capabilities.get("elicitation")
+    if version in {"2025-06-18", "2025-11-25"} and isinstance(core, dict) and (
+            not core or isinstance(core.get("form"), dict)):
+        return "elicitation/create"
+    return None
+
+
+def confirm_album_action(review, incoming, parent_id, method="elicitation/create"):
     request_id = f"spliff-confirm-{uuid4().hex}"
     label = {"replace": "Replace", "keep": "Keep both / Add to library",
-             "rollback": "Roll back this replacement"}[review["mode"]]
+             "rollback": "Roll back this replacement", "probe": "test this confirmation dialog only"}[review["mode"]]
     paths = []
     for file in review["files"]:
+        if file.get("source"):
+            paths.append(f'Staged file {file["source"]}')
         if review["mode"] == "rollback":
             paths.extend([f'Restore {file["archive"]} to {file["original"]}',
                           f'Retain {file["install"]} at {file["recover_download"]}'])
@@ -144,7 +171,7 @@ def confirm_album_action(review, incoming, parent_id):
                 paths.append("Recording identity is unresolved. Approval accepts this exception. "
                              + json.dumps(evidence))
     message = f"Authorize Spliff to {label}?\n" + "\n".join(paths)
-    print(json.dumps({"jsonrpc": "2.0", "id": request_id, "method": "elicitation/create",
+    print(json.dumps({"jsonrpc": "2.0", "id": request_id, "method": method,
                       "params": {"mode": "form", "message": message,
                                  "requestedSchema": {"type": "object", "properties": {
                                      "authorize": {"type": "boolean", "title": "Authorize these exact file operations",
@@ -251,6 +278,12 @@ DOWNLOAD_TOOLS = [
       "mode": {"enum": ["keep", "replace"]}, "library_root": {"type": "string"},
       "override_track_ids": {"type": "array", "maxItems": 50, "uniqueItems": True,
                              "items": {"type": "integer", "minimum": 1}}}, album_actions.preview),
+    ("spliff_confirmation_diagnostics", "Report the MCP version and negotiated confirmation modes. "
+     "Set probe=true only to test a harmless confirmation dialog. This never changes library files.",
+     {"probe": {"type": "boolean"}}, None),
+    ("inspect_album_recovery_journal", "Read the recovery journal for this staged candidate. "
+     "Returns planned files and recovery paths without changing them.",
+     {"candidate_id": {"type": "string"}}, album_actions.inspect_recovery),
     ("get_album_action_status", "Read the committed album action and its recovery information.",
      {"candidate_id": {"type": "string"}}, album_actions.status),
     ("analyze_download_spectrum", "Generate a spectrogram for one completed download and its matched "
@@ -278,7 +311,8 @@ DOWNLOAD_TOOLS = [
 APPLY_TOOL = (
     "apply_album_action",
     "Execute the selected, unexpired album action after the user chooses it. Spliff sends a host "
-    "confirmation form showing the exact reviewed paths. Pass the plan ID from the selected option.",
+    "confirmation form if supported. Otherwise return a local approval link for the exact plan. "
+    "If the preview already provides a local approval link, present it directly.",
     {"candidate_id": {"type": "string"}, "original_track_id": {"type": "integer", "minimum": 1},
      "mode": {"enum": ["keep", "replace"]}, "plan_id": {"type": "string", "minLength": 32, "maxLength": 32}},
     album_actions.apply,
@@ -286,7 +320,7 @@ APPLY_TOOL = (
 
 ROLLBACK_TOOL = (
     "rollback_album_action", "Restore hidden-archive originals for a completed replacement. Use its "
-    "transaction ID from get_album_action_status. Spliff requests host confirmation for the exact paths.",
+    "transaction ID from get_album_action_status. Requires negotiated MCP form elicitation for the exact paths.",
     {"candidate_id": {"type": "string"}, "transaction_id": {"type": "string"}}, album_rollback.rollback,
 )
 
@@ -314,6 +348,7 @@ REQUIRED = {"search_nicotine": ["query"], "search_discogs_releases": ["artist", 
             "apply_album_action": ["candidate_id", "mode", "plan_id"],
             "rollback_album_action": ["candidate_id", "transaction_id"],
             "get_album_action_status": ["candidate_id"],
+            "inspect_album_recovery_journal": ["candidate_id"],
             "artist_library": ["artist"], "search_artist_upgrades": ["artist"],
             "index_music_folder": ["folder"], "sync_music_folder": ["folder"],
             "analyze_library_spectrum": ["track_id"], "analyze_download_spectrum": ["candidate_id"],
@@ -336,7 +371,7 @@ def serve(db, search_only=False, allow_downloads=False, allow_discogs=False, das
         {**NICOTINE_TOOL[2], "kind": {"enum": ["auto", "artist", "track", "album"]}}, search_for_chat)
     available = [NICOTINE_TOOL] if search_only else [*TOOLS, local_search]
     if allow_downloads and not search_only:
-        available.extend(DOWNLOAD_TOOLS)
+        available.extend([*DOWNLOAD_TOOLS, APPLY_TOOL, ROLLBACK_TOOL])
     if allow_discogs and not search_only:
         available.extend(DISCOGS_TOOLS)
     if search_only:
@@ -348,15 +383,16 @@ def serve(db, search_only=False, allow_downloads=False, allow_discogs=False, das
                         "Use spliff_transfer_readiness when staging is blocked and give the user its local Settings link. "
                         "Only the user can change transfer permission in Settings. "
                         "Discover existing transfers with list_nicotine_transfers. Handle candidate IDs internally. "
-                        "Present reviewed choices and destinations from review_nicotine_download. Use apply_album_action "
-                        "when available, or the local approval link supplied by the review. "
+                        "Present reviewed choices and destinations from review_nicotine_download. When the selected plan "
+                        "has an approval_url, give the link directly to the user and let them approve on their Mac. "
+                        "For a native host form use apply_album_action. Read get_album_action_status after approval. "
                         "Read nicotine_transfer_status for the outcome.")
     else:
         instructions = "Use artist_library to inspect owned releases and index_music_folder for a selected folder."
     initialized = False
     incoming = iter(sys.stdin)
-    active_tools = available
-    host_confirmation = False
+    confirmation_method = None
+    handshake = {}
     for line in incoming:
         request_id = None
         try:
@@ -381,19 +417,26 @@ def serve(db, search_only=False, allow_downloads=False, allow_discogs=False, das
             if not isinstance(version, str):
                 respond(request_id, error=(-32602, "Protocol version required"))
                 continue
-            if initialized:
-                respond(request_id, error=(-32600, "The server was already initialized"))
-                continue
+            # The tunnel reuses its stdio child across discovery sessions. Reset
+            # authorization capability on each initialize, including discovery.
             capabilities = params.get("capabilities", {})
-            elicitation = capabilities.get("elicitation") if isinstance(capabilities, dict) else None
-            host_confirmation = (allow_downloads and not search_only and version in {"2025-06-18", "2025-11-25"}
-                                 and isinstance(elicitation, dict)
-                                 and (not elicitation or isinstance(elicitation.get("form"), dict)))
-            active_tools = [*available, APPLY_TOOL, ROLLBACK_TOOL] if host_confirmation else available
+            capabilities = capabilities if isinstance(capabilities, dict) else {}
+            extensions = capabilities.get("extensions")
+            extensions = extensions if isinstance(extensions, dict) else {}
+            confirmation_method = form_method(version, capabilities) if allow_downloads and not search_only else None
+            handshake = {"offered_protocol": version,
+                         "negotiated_protocol": version if version in VERSIONS else "2025-11-25",
+                         "capability_names": sorted(capabilities),
+                         "core_elicitation_modes": sorted(capabilities["elicitation"])
+                         if isinstance(capabilities.get("elicitation"), dict) else None,
+                         "openai_elicitation_modes": sorted(extensions["openai/elicitation"])
+                         if isinstance(extensions.get("openai/elicitation"), dict) else None,
+                         "confirmation_method": confirmation_method}
+            print("Spliff MCP handshake " + json.dumps(handshake), file=sys.stderr, flush=True)
             initialized = True
             respond(request_id, {
                 "protocolVersion": version if version in VERSIONS else "2025-11-25",
-                "serverInfo": {"name": "spliff", "title": "Spliff", "version": "0.1.0"},
+                "serverInfo": {"name": "spliff", "title": "Spliff", "version": "0.1.3"},
                 "capabilities": {"tools": {}},
                 "instructions": instructions,
             })
@@ -409,11 +452,11 @@ def serve(db, search_only=False, allow_downloads=False, allow_discogs=False, das
                                  **({"required": REQUIRED[name]} if name in REQUIRED else {})},
                  "annotations": {"readOnlyHint": name not in WRITES, "openWorldHint": name in OPEN_WORLD,
                                  "destructiveHint": name in {"apply_album_action", "rollback_album_action"}}}
-                for name, description, properties, _ in active_tools
+                for name, description, properties, _ in available
             ]})
         elif method == "tools/call":
             arguments = params.get("arguments", {})
-            tool = next((tool for tool in active_tools if tool[0] == params.get("name")), None)
+            tool = next((tool for tool in available if tool[0] == params.get("name")), None)
             if not tool or not isinstance(arguments, dict) or arguments.keys() - tool[2].keys() or not set(
                     REQUIRED.get(tool[0], ())).issubset(arguments):
                 respond(request_id, error=(-32602, "Unknown tool or invalid arguments"))
@@ -421,12 +464,39 @@ def serve(db, search_only=False, allow_downloads=False, allow_discogs=False, das
             try:
                 if tool[3] is transfer_readiness:
                     payload = {**tool[3](), "settings_url": f"http://127.0.0.1:{dashboard_port}/?settings=1"}
+                elif tool[0] == "spliff_confirmation_diagnostics":
+                    payload = {**handshake, "album_confirmation_route": (
+                        "host_form" if confirmation_method else "local_approval")}
+                    if arguments.get("probe") is True:
+                        payload["probe"] = ("accepted" if confirm_album_action({"mode": "probe", "files": []},
+                                            incoming, request_id, confirmation_method) else "declined_or_unsupported"
+                                            ) if confirmation_method else "no_negotiated_form"
                 elif tool[3] is review_for_chat:
                     payload = review_for_chat(db, dashboard_port=dashboard_port,
-                                              host_confirmation=host_confirmation, **arguments)
+                                              host_confirmation=bool(confirmation_method), **arguments)
+                elif tool[3] is album_actions.preview:
+                    payload = album_actions.preview(db, **arguments)
+                    if not confirmation_method:
+                        payload["approval_url"] = local_approval_url(dashboard_port, payload["plan_id"])
+                elif tool[3] is album_actions.apply and not confirmation_method:
+                    recorded = album_actions.status(db, arguments["candidate_id"])
+                    if recorded.get("transaction_id") == arguments["plan_id"]:
+                        payload = album_actions.apply(db, **arguments, confirm=lambda _: False)
+                    else:
+                        review, _ = album_actions.local_review(db, arguments["plan_id"])
+                        for key in ("candidate_id", "original_track_id", "mode"):
+                            if review[key] != arguments.get(key):
+                                raise ValueError("The action plan does not match this request. Review the album again.")
+                        payload = {"status": "local_approval_required",
+                                   "approval_url": local_approval_url(dashboard_port, review["plan_id"]),
+                                   "message": "Open this link on the Mac running Spliff and approve the exact plan once. "
+                                              "Then call get_album_action_status."}
                 elif tool[3] in (album_actions.apply, album_rollback.rollback):
+                    if not confirmation_method:
+                        raise ValueError("This MCP session did not negotiate form confirmation. "
+                                         "Spliff cannot authorize album file changes through this session.")
                     payload = tool[3](db, **arguments,
-                                                  confirm=lambda review: confirm_album_action(review, incoming, request_id))
+                                                  confirm=lambda review: confirm_album_action(review, incoming, request_id, confirmation_method))
                 else:
                     payload = tool[3](db, **arguments)
                 if tool[0] in ("analyze_library_spectrum", "analyze_download_spectrum"):
@@ -439,7 +509,8 @@ def serve(db, search_only=False, allow_downloads=False, allow_discogs=False, das
                     result = {"content": content}
                 else:
                     result = {"content": [{"type": "text", "text": json.dumps(payload)}]}
-                    if tool[3] in (album_actions.preview, album_actions.apply, album_actions.status, album_rollback.rollback, review_for_chat):
+                    if tool[3] in (album_actions.preview, album_actions.apply, album_actions.status, album_actions.inspect_recovery,
+                                   album_rollback.rollback, review_for_chat):
                         result["structuredContent"] = payload
             except TransferError as exc:
                 payload = {"code": exc.code, "message": str(exc),

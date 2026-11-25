@@ -43,6 +43,8 @@ CREATE TABLE IF NOT EXISTS upgrade_recovery(
 CREATE TABLE IF NOT EXISTS mcp_album_plans(
  id TEXT PRIMARY KEY, candidate TEXT NOT NULL, original_id INTEGER, mode TEXT NOT NULL,
  expires INTEGER NOT NULL, plan TEXT NOT NULL, review TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS mcp_album_authorizations(
+ plan_id TEXT PRIMARY KEY, consumed_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS upgrade_results(
  candidate TEXT PRIMARY KEY, result TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS edition_evidence(

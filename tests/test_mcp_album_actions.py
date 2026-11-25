@@ -1,5 +1,7 @@
 import base64
 import json
+import os
+import re
 import shutil
 import sys
 import subprocess
@@ -7,10 +9,17 @@ import unittest
 from contextlib import closing, redirect_stdout
 from io import StringIO
 from pathlib import Path
+from queue import Queue
+from threading import Thread
+from http.server import ThreadingHTTPServer
+from urllib.error import HTTPError
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
+from uuid import uuid4
 from unittest.mock import patch
 
 import test_library_import
-from spliff import album_actions, album_rollback, mcp
+from spliff import album_actions, album_rollback, keep_both, mcp, web
 from spliff.catalog import connect, replacement_preference
 from spliff.scanner import scan
 
@@ -22,10 +31,10 @@ class MCPAlbumActions(unittest.TestCase):
     setUp = test_library_import.FirstTimeImport.setUp
     stage = test_library_import.FirstTimeImport.stage
 
-    def original(self, *, protected=False):
+    def original(self, *, protected=False, filename="01 Song 1.mp3"):
         folder = self.root / "Fixture Artist" / "Albums" / "[1995] Fixture Album"
         folder.mkdir(parents=True)
-        path = folder / "01 Song 1.mp3"
+        path = folder / filename
         subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "sine=frequency=220:duration=3.5",
                         "-metadata", "title=Song 1", "-metadata", "artist=Fixture Artist",
                         "-metadata", "album=Fixture Album", "-metadata", "date=1995", str(path)], check=True)
@@ -183,6 +192,11 @@ class MCPAlbumActions(unittest.TestCase):
         self.assertTrue(original.exists())
         self.assertTrue(self.job.exists())
         self.assertFalse(Path(plan["destination"]).exists())
+        with self.assertRaisesRegex(ValueError, "already used"):
+            album_actions.apply(self.db, self.candidate, "keep", plan["plan_id"],
+                                original_track_id=track, confirm=lambda _: self.fail("Replayed authorization"))
+        plan = album_actions.preview(self.db, self.candidate, "keep", track)
+        symlink_plan = album_actions.preview(self.db, self.candidate, "keep", track)
         offline = self.root.with_name("offline")
         self.root.rename(offline)
         with self.assertRaises(OSError):
@@ -190,7 +204,7 @@ class MCPAlbumActions(unittest.TestCase):
                                 original_track_id=track, confirm=lambda _: True)
         self.root.symlink_to(offline, target_is_directory=True)
         with self.assertRaises(OSError):
-            album_actions.apply(self.db, self.candidate, "keep", plan["plan_id"],
+            album_actions.apply(self.db, self.candidate, "keep", symlink_plan["plan_id"],
                                 original_track_id=track, confirm=lambda _: True)
 
     def test_unavailable_transfer_offers_search_without_new_queue(self):
@@ -252,3 +266,203 @@ class MCPAlbumActions(unittest.TestCase):
         self.assertTrue(any(path.endswith("17 Sensemilia Persecution.flac") for path in result["files_imported"]))
         for original, expected in originals.items():
             self.assertEqual(original.read_bytes(), expected)
+
+    def test_tunnel_rediscovery_resets_form_capability(self):
+        def request(request_id, method, **params):
+            return json.dumps({"jsonrpc": "2.0", "id": request_id, "method": method, "params": params})
+
+        version = {"protocolVersion": "2025-11-25"}
+        requests = [
+            request(1, "initialize", **version, capabilities={"elicitation": {"form": {}}}),
+            request(2, "tools/list"),
+            request(3, "initialize", **version, capabilities={}),
+            request(4, "tools/list"),
+            request(5, "tools/call", name="apply_album_action",
+                    arguments={"candidate_id": self.candidate, "mode": "keep", "plan_id": "1" * 32}),
+        ]
+        output = StringIO()
+        with patch("sys.stdin", StringIO("\n".join(requests))), redirect_stdout(output):
+            mcp.serve(self.db, allow_downloads=True)
+        first, tools, second, updated, blocked = [json.loads(line)["result"] for line in output.getvalue().splitlines()]
+        self.assertEqual(first["serverInfo"], second["serverInfo"])
+        self.assertIn("apply_album_action", {tool["name"] for tool in tools["tools"]})
+        names = {tool["name"] for tool in updated["tools"]}
+        self.assertIn("apply_album_action", names)
+        self.assertIn("get_album_action_status", names)
+        self.assertTrue(blocked["isError"])
+        self.assertIn("expired", blocked["structuredContent"]["message"])
+
+    def test_openai_extension_negotiates_its_legacy_method(self):
+        caps = {"extensions": {"openai/elicitation": {"form": {}}}}
+        self.assertEqual(mcp.form_method("2025-11-25", caps), "openai/elicitation/create")
+        self.assertIsNone(mcp.form_method("2026-07-28", caps))
+        self.assertIsNone(mcp.form_method("2025-11-25", {"extensions": {"openai/elicitation": {"url": {}}}}))
+        self.assertIsNone(mcp.form_method("2025-11-25", {}))
+
+    def test_local_http_approval_replaces_exact_review_and_reports_to_mcp(self):
+        source, = self.stage()
+        original, track = self.original()
+        expected = original.read_bytes()
+        replacement_preference(self.db, "hidden")
+        started = Queue()
+
+        def bind(address, handler):
+            server = ThreadingHTTPServer(address, handler)
+            started.put(server)
+            return server
+
+        with patch.object(web, "ThreadingHTTPServer", side_effect=bind), patch.object(web.sync, "run_worker"), \
+                patch.object(keep_both, "staging_root", return_value=self.staging):
+            thread = Thread(target=web.serve, args=(self.db, 0), daemon=True)
+            thread.start()
+            server = started.get(timeout=5)
+            try:
+                base = f"http://127.0.0.1:{server.server_port}"
+                plan = album_actions.preview(self.db, self.candidate, "replace", track, override_track_ids=[track])
+                url = mcp.local_approval_url(server.server_port, plan["plan_id"])
+
+                def get_form():
+                    with urlopen(url, timeout=10) as response:
+                        page = response.read().decode()
+                    self.assertIn(str(source), page)
+                    self.assertIn(str(original.with_suffix(".flac")), page)
+                    self.assertIn("Recording exception", page)
+                    return re.search(r'name="approval" value="([^"]+)"', page)[1]
+
+                def post(approval, decision, origin=base):
+                    form = urlencode({"plan": plan["plan_id"], "approval": approval, "decision": decision})
+                    return urlopen(Request(base + "/album-approval", data=form.encode(),
+                                           headers={"Origin": origin}), timeout=15)
+
+                token = get_form()
+                with self.assertRaises(HTTPError) as denied:
+                    post(token, "approve", origin="https://example.invalid")
+                self.assertEqual(denied.exception.code, 403)
+                with post(token, "decline") as response:
+                    self.assertIn(b"No files were changed", response.read())
+                with self.assertRaises(HTTPError):
+                    post(token, "approve")
+                self.assertEqual(original.read_bytes(), expected)
+                with post(get_form(), "approve") as response:
+                    self.assertIn(b"Completed", response.read())
+                result = album_actions.status(self.db, self.candidate)
+                self.assertEqual(result["transaction_id"], plan["plan_id"])
+                self.assertTrue(result["rollback_available"])
+                self.assertEqual(Path(result["files_archived"][0]).read_bytes(), expected)
+                self.assertFalse(original.exists())
+            finally:
+                server.shutdown()
+                thread.join(timeout=5)
+
+    def test_interrupted_cleanup_leaves_readable_journal_and_preserves_original(self):
+        self.stage()
+        original, track = self.original()
+        replacement_preference(self.db, "hidden")
+        with patch.object(keep_both, "staging_root", return_value=self.staging):
+            plan = album_actions.preview(self.db, self.candidate, "replace", track, override_track_ids=[track])
+            with patch.object(keep_both, "verify_published", side_effect=ValueError("interrupted publication")), \
+                    patch.object(keep_both, "clean_work", side_effect=OSError("interrupted cleanup")):
+                with self.assertRaisesRegex(ValueError, "recovery plan"):
+                    album_actions.apply(self.db, self.candidate, "replace", plan["plan_id"],
+                                        original_track_id=track, confirm=lambda _: True)
+        journal, = album_actions.inspect_recovery(self.db, self.candidate)["journals"]
+        self.assertEqual(journal["files"][0]["mp3"], str(original))
+        before = Path(journal["journal"]).read_bytes()
+        self.assertEqual(album_actions.status(self.db, self.candidate)["status"], "recovery_needed")
+        self.assertTrue(original.exists())
+        self.assertTrue(self.job.exists())
+        self.assertEqual(Path(journal["journal"]).read_bytes(), before)
+
+    @unittest.skipUnless(os.getenv("SPLIFF_TEST_MAC_TRASH") == "1", "Opt-in test writes one disposable file to Mac Trash")
+    def test_real_mac_trash_after_verified_flac_install(self):
+        source, = self.stage()
+        original, track = self.original(filename=f"Spliff-test-{uuid4().hex}.mp3")
+        expected = original.read_bytes()
+        download = source.read_bytes()
+        run = subprocess.run
+
+        def observe(command, **kwargs):
+            if command[0] == keep_both.TRASH:
+                self.assertEqual(original.with_suffix(".flac").read_bytes(), download)
+                self.assertEqual(Path(command[1]).read_bytes(), expected)
+            return run(command, **kwargs)
+
+        with patch.object(keep_both, "staging_root", return_value=self.staging), \
+                patch.object(keep_both.subprocess, "run", side_effect=observe):
+            plan = album_actions.preview(self.db, self.candidate, "replace", track, override_track_ids=[track])
+            result = album_actions.apply(self.db, self.candidate, "replace", plan["plan_id"],
+                                         original_track_id=track, confirm=lambda _: True)
+        self.assertEqual(result["status"], "completed")
+        self.assertIsNone(result["trash_pending"])
+        self.assertFalse(original.exists())
+        self.assertEqual(original.with_suffix(".flac").read_bytes(), download)
+
+    def test_plan_changed_inside_confirmation_requires_fresh_approval(self):
+        source, = self.stage()
+        original, track = self.original()
+        replacement_preference(self.db, "hidden")
+        with patch.object(keep_both, "staging_root", return_value=self.staging):
+            plan = album_actions.preview(self.db, self.candidate, "replace", track, override_track_ids=[track])
+
+            def approve_and_change_destination(_):
+                original.with_suffix(".flac").write_bytes(b"new destination occupant")
+                return True
+
+            with self.assertRaises(ValueError):
+                album_actions.apply(self.db, self.candidate, "replace", plan["plan_id"], original_track_id=track,
+                                    confirm=approve_and_change_destination)
+            with self.assertRaisesRegex(ValueError, "already used"):
+                album_actions.apply(self.db, self.candidate, "replace", plan["plan_id"], original_track_id=track,
+                                    confirm=lambda _: self.fail("Authorization replayed"))
+        self.assertTrue(source.exists())
+        self.assertTrue(original.exists())
+        self.assertEqual(original.with_suffix(".flac").read_bytes(), b"new destination occupant")
+
+    def test_process_crash_leaves_recovery_journal_and_original(self):
+        self.stage()
+        original, track = self.original()
+        replacement_preference(self.db, "hidden")
+        with patch.object(keep_both, "staging_root", return_value=self.staging):
+            plan = album_actions.preview(self.db, self.candidate, "replace", track, override_track_ids=[track])
+        program = """
+import os
+import sys
+from pathlib import Path
+from unittest.mock import patch
+from spliff import album_actions, keep_both, staged_downloads
+db, staging, candidate, plan, original = sys.argv[1:]
+with patch.object(keep_both, "staging_root", return_value=Path(staging)), \
+     patch.object(staged_downloads, "staging_root", return_value=Path(staging)), \
+     patch.object(staged_downloads, "request", side_effect=ValueError("Read staged files")), \
+     patch.object(keep_both, "verify_published", side_effect=lambda *_: os._exit(41)):
+    album_actions.apply(Path(db), candidate, "replace", plan, original_track_id=int(original), confirm=lambda _: True)
+"""
+        crashed = subprocess.run([sys.executable, "-c", program, str(self.db), str(self.staging), self.candidate,
+                                  plan["plan_id"], str(track)], capture_output=True, text=True, timeout=30)
+        self.assertEqual(crashed.returncode, 41, crashed.stderr)
+        self.assertTrue(original.exists())
+        self.assertTrue(self.job.exists())
+        journal, = album_actions.inspect_recovery(self.db, self.candidate)["journals"]
+        self.assertEqual(journal["files"][0]["installed"], str(original.with_suffix(".flac")))
+        self.assertEqual(album_actions.status(self.db, self.candidate)["status"], "recovery_needed")
+
+    def test_openai_extension_probe_uses_host_response(self):
+        output = StringIO()
+
+        def messages():
+            yield json.dumps({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {
+                "protocolVersion": "2025-11-25",
+                "capabilities": {"extensions": {"openai/elicitation": {"form": {}}}},
+            }})
+            yield json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
+                "name": "spliff_confirmation_diagnostics", "arguments": {"probe": True},
+            }})
+            dialog = json.loads(output.getvalue().splitlines()[-1])
+            self.assertEqual(dialog["method"], "openai/elicitation/create")
+            yield json.dumps({"jsonrpc": "2.0", "id": dialog["id"], "result": {
+                "action": "accept", "content": {"authorize": True},
+            }})
+        with patch("sys.stdin", messages()), redirect_stdout(output):
+            mcp.serve(self.db, allow_downloads=True)
+        response = json.loads(output.getvalue().splitlines()[-1])
+        self.assertEqual(json.loads(response["result"]["content"][0]["text"])["probe"], "accepted")

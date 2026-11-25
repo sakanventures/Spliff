@@ -308,7 +308,7 @@ def preview(db, candidate, original, mode="keep", *, strict=False, overrides=())
     preview = {"token": token, "album": plan["album"], "destination": str(destination),
                "archive": archive, "count": len(plan["pairs"]), "skipped": plan["skipped"],
                "preserved": plan["preserved"],
-               "files": [{"original": pair["mp3"], "install": str(destination / pair["relative"]),
+               "files": [{"original": pair["mp3"], "source": pair["flac"], "install": str(destination / pair["relative"]),
                           "audio_evidence": pair["evidence"], "recording_evidence": pair["recording_evidence"],
                           "archive": str(Path(archive) / Path(pair["mp3"]).relative_to(destination))
                           if plan["original_mode"] != "trash" else "Mac Trash"}

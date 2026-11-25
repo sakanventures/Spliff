@@ -1,4 +1,5 @@
 """Local dashboard and explicitly requested catalog actions."""
+from html import escape
 import json
 import secrets
 import shutil
@@ -13,7 +14,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from .catalog import albums, connect, file_metadata_preference, replacement_preference, stats, tracks
-from . import album_metadata, keep_both, library_import, sync
+from . import album_actions, album_metadata, keep_both, library_import, sync
 from .discogs import release_cover
 from .nicotine_bridge.downloads import selection_parts
 from .nicotine_bridge.wire import staging_root
@@ -26,12 +27,46 @@ from .staged_downloads import list_downloads, queue, review_download
 MAX_CANDIDATE_BYTES = 512 * 1024 * 1024
 STATIC = Path(__file__).with_name("static")
 ASSETS = {"/": ("index.html", "text/html"), "/app.css": ("app.css", "text/css"),
-          "/app.js": ("app.js", "text/javascript")}
+          "/app.js": ("app.js", "text/javascript"),
+          "/album-approval.css": ("album-approval.css", "text/css")}
 ASSETS.update({
     f"/fonts/poppins-{subset}-{weight}.woff2": (f"fonts/poppins-{subset}-{weight}.woff2", "font/woff2")
     for subset in ("latin", "latin-ext")
     for weight in (400, 500, 600, 700)
 })
+
+def album_approval_page(title, content):
+    return (f'<!doctype html><html lang="en"><meta charset="utf-8">'
+            f'<meta name="viewport" content="width=device-width, initial-scale=1">'
+            f'<title>{escape(title)} · Spliff</title><link rel="stylesheet" href="/album-approval.css">'
+            f'<main><h1>{escape(title)}</h1>{content}</main></html>').encode()
+
+
+def render_album_review(review, approval):
+    action = "Replace" if review["mode"] == "replace" else "Keep both"
+    entries = []
+    for file in review["files"]:
+        file_paths = "".join(f"<dt>{label}</dt><dd>{escape(file[key])}</dd>"
+                             for key, label in (("source", "Staged file"), ("install", "Install at"),
+                                                ("original", "Original"), ("archive", "Archive to"))
+                             if file.get(key))
+        evidence = file.get("recording_evidence") or {}
+        warning = ("<p><strong>Recording exception.</strong> The recording identity remains unresolved.</p>"
+                   if evidence.get("overridden") else "")
+        entries.append(f"<li><dl>{file_paths}</dl>{warning}</li>")
+    overrides = ", ".join(map(str, review["override_track_ids"]))
+    warning = (f"<p>Approval accepts the recording exceptions for track IDs {overrides}.</p>" if overrides else "")
+    skipped = "".join(f"<li>{escape(item.get('download', 'Track'))} — {escape(item['reason'])}</li>"
+                      for item in review.get("skipped", []))
+    skipped_html = f"<h2>Skipped files</h2><ul>{skipped}</ul>" if skipped else ""
+    return album_approval_page(f"Review {action}", f'<p>Review the exact files below. Approval runs this plan on your Mac.</p>'
+        f'<ol>{"".join(entries)}</ol>{warning}{skipped_html}'
+        f'<form method="post" action="/album-approval">'
+        f'<input type="hidden" name="plan" value="{escape(review["plan_id"])}">'
+        f'<input type="hidden" name="approval" value="{escape(approval)}">'
+        f'<button name="decision" value="approve">Approve {action}</button>'
+        '<button name="decision" value="decline">Decline</button></form>')
+
 
 def folder_cover(folder):
     if not folder.is_dir() or folder.resolve() != folder:
@@ -129,6 +164,11 @@ def serve(db, port):
                 if url.path in ASSETS:
                     filename, mime = ASSETS[url.path]
                     self.reply((STATIC / filename).read_bytes(), mime)
+                elif url.path == "/album-approval":
+                    plan_id = params.get("plan")
+                    review, digest = album_actions.local_review(db, plan_id)
+                    approval = issue_approval(("mcp-album", plan_id, digest))
+                    self.reply(render_album_review(review, approval), "text/html")
                 elif url.path == "/api/tracks":
                     self.reply_json(tracks(db, params.get("q", ""), params.get("scope", "all"),
                                            after=int(params.get("after", 0))))
@@ -218,9 +258,13 @@ def serve(db, port):
 
         def do_POST(self):
             host = f"127.0.0.1:{server.server_port}"
+            local_form = self.path == "/album-approval"
             if (self.headers.get("Host") != host or self.headers.get("Origin") != f"http://{host}"
-                    or self.headers.get("X-Spliff-Action") != "dashboard"):
+                    or (not local_form and self.headers.get("X-Spliff-Action") != "dashboard")):
                 self.reply_json({"error": "Open the local Spliff dashboard to make changes."}, 403)
+                return
+            if local_form:
+                self.apply_album_form()
                 return
             try:
                 parts = urlsplit(self.path).path.strip("/").split("/")
@@ -390,6 +434,35 @@ def serve(db, port):
             except (FileNotFoundError, OSError, subprocess.SubprocessError, IndexError, KeyError):
                 self.reply_json({"error": "Spliff could not read the selected file or folder. Check access and try again."}, 422)
 
+        def apply_album_form(self):
+            try:
+                if self.headers.get_content_type() != "application/x-www-form-urlencoded":
+                    raise ValueError("Submit the local Spliff approval form.")
+                fields = parse_qs(self.rfile.read(self.body_length(2048)).decode(), max_num_fields=3)
+                if set(fields) != {"plan", "approval", "decision"} or any(len(value) != 1 for value in fields.values()):
+                    raise ValueError("Open the local Spliff approval page again.")
+                plan_id, approval, choice = (fields[key][0] for key in ("plan", "approval", "decision"))
+                if choice not in {"approve", "decline"}:
+                    raise ValueError("Choose Approve or Decline on the local page.")
+                review, digest = album_actions.local_review(db, plan_id)
+                consume_approval(approval, ("mcp-album", plan_id, digest))
+                if choice == "decline":
+                    self.reply(album_approval_page("Declined", "<p>No files were changed.</p>"), "text/html")
+                    return
+                result = album_actions.apply(db, review["candidate_id"], review["mode"], plan_id,
+                                             original_track_id=review["original_track_id"], review_digest=digest,
+                                             confirm=lambda _: True)
+            except (ValueError, OSError, sqlite3.Error) as exc:
+                message = str(exc) if isinstance(exc, (ValueError, OSError)) else "The local catalog is unavailable."
+                self.reply(album_approval_page("Action stopped", f"<p>{escape(message)}</p>"
+                           "<p>Check the transaction status in ChatGPT before requesting a new review.</p>"),
+                           "text/html", 409)
+                return
+            title = "Completed" if result["status"] == "completed" else "Check recovery status"
+            self.reply(album_approval_page(title,
+                       f'<p>Transaction <code>{escape(result["transaction_id"])}</code></p>'
+                       '<p>Return to ChatGPT to check the recorded transaction status.</p>'), "text/html")
+
         def body_length(self, maximum):
             value = self.headers.get("Content-Length")
             if self.headers.get("Transfer-Encoding") or value is None or not value.isascii() or not value.isdigit():
@@ -455,8 +528,9 @@ def serve(db, port):
             self.send_header("Content-Length", str(len(content)))
             self.send_header("Cache-Control", "no-store")
             self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Referrer-Policy", "no-referrer")
             self.send_header("Content-Security-Policy",
-                             "default-src 'self'; img-src 'self' https://i.discogs.com; frame-ancestors 'none'; object-src 'none'")
+                             "default-src 'self'; img-src 'self' https://i.discogs.com; frame-ancestors 'none'; object-src 'none'; form-action 'self'")
             self.end_headers()
             self.wfile.write(content)
 
