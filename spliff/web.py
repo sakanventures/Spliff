@@ -13,7 +13,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from .catalog import albums, connect, file_metadata_preference, replacement_preference, stats, tracks
-from . import keep_both, library_import, sync
+from . import album_metadata, keep_both, library_import, sync
 from .discogs import release_cover
 from .nicotine_bridge.downloads import selection_parts
 from .nicotine_bridge.wire import staging_root
@@ -40,6 +40,8 @@ def folder_cover(folder):
     images = sorted((path for path in folder.iterdir() if path.suffix.lower() in (".jpg", ".jpeg", ".png")),
                     key=lambda path: (names.index(path.stem.lower()) if path.stem.lower() in names else len(names),
                                       path.name.lower()))
+    if len(images) > 1:
+        images = [path for path in images if path.stem.lower() in names]
     for path in images:
         if path.is_symlink() or not path.is_file() or path.stat().st_size > 12 * 1024 * 1024:
             continue
@@ -48,6 +50,19 @@ def folder_cover(folder):
             return data, "image/jpeg"
         if data.startswith(b"\x89PNG\r\n\x1a\n"):
             return data, "image/png"
+    return None
+
+
+def library_cover(db, track_id):
+    with closing(connect(db)) as connection:
+        track = connection.execute("SELECT root, path FROM tracks WHERE id=? AND present=1",
+                                   (track_id,)).fetchone()
+    if track:
+        folder = (Path(track["root"]) / track["path"]).parent
+        cover = folder_cover(folder)
+        if not cover and folder.name.lower().startswith("disc ") and folder.name[5:].isdigit():
+            cover = folder_cover(folder.parent)
+        return cover
     return None
 
 
@@ -75,6 +90,8 @@ def serve(db, port):
         with approval_lock:
             issued = approvals.get(approval)
             if not issued or issued[0] <= monotonic() or issued[1] != selection:
+                if selection[0] == "metadata":
+                    raise ValueError("Review the local metadata plan again before saving.")
                 if selection[0] == "import":
                     raise ValueError("Review the local import plan again before choosing Add to library.")
                 raise ValueError("Open the local upgrade review again and choose one of its displayed plans.")
@@ -124,30 +141,37 @@ def serve(db, port):
                 elif url.path == "/api/file-metadata-preference":
                     self.reply_json(file_metadata_preference(db))
                 elif url.path == "/api/albums":
-                    self.reply_json(albums(db, params.get("q", "")))
+                    self.reply_json(albums(db, params.get("q", ""), recommended=params.get("recommended") == "1"))
                 elif url.path == "/api/artist-library":
                     self.reply_json(artist_library(db, params.get("artist"), int(params.get("after", 0))))
                 elif url.path == "/api/downloads":
-                    self.reply_json({"items": list_downloads(db)})
+                    with closing(connect(db)) as connection:
+                        history = connection.execute(
+                            "SELECT candidate, destination, mode, created FROM kept_albums "
+                            "ORDER BY created DESC, candidate DESC").fetchall()
+                    self.reply_json({"items": list_downloads(db), "history": [dict(row) for row in history]})
                 elif url.path == "/api/scan-progress":
                     with scan_lock:
                         progress = scan_state
                     self.reply_json({"scan": progress})
                 elif url.path == "/api/sync":
                     self.reply_json(sync.status(db))
+                elif url.path == "/api/metadata-albums":
+                    self.reply_json(albums(db, params.get("q", ""), metadata=True))
+                elif url.path == "/api/metadata-editions":
+                    self.reply_json(album_metadata.options(db, int(params.get("track", 0))))
+                elif url.path == "/api/library-cover":
+                    cover = library_cover(db, int(params.get("track", 0)))
+                    if cover:
+                        self.reply(*cover)
+                    else:
+                        self.send_error(404)
                 elif url.path == "/api/review-art":
                     candidate = params.get("candidate")
                     selection_parts(candidate)
                     cover = folder_cover(staging_root() / candidate)
                     if not cover and params.get("original"):
-                        with closing(connect(db)) as connection:
-                            track = connection.execute("SELECT path FROM tracks WHERE id=? AND present=1",
-                                                       (int(params["original"]),)).fetchone()
-                        if track:
-                            folder = Path(track["path"]).parent
-                            cover = folder_cover(folder)
-                            if not cover and folder.name.lower().startswith("disc ") and folder.name[5:].isdigit():
-                                cover = folder_cover(folder.parent)
+                        cover = library_cover(db, int(params["original"]))
                     if cover:
                         self.reply(*cover)
                     elif params.get("edition") and (image := release_cover(int(params["edition"]))):
@@ -217,6 +241,22 @@ def serve(db, port):
                     except OSError:
                         raise ValueError("Spliff could not install Spliff Search. Try again or contact Spliff support.")
                     self.reply_json({"message": "Quit and reopen Nicotine+, then enable Spliff Search in Settings → Plugins."})
+                    return
+                if parts == ["api", "metadata-plan"]:
+                    self.body_length(0)
+                    params = parse_qs(urlsplit(self.path).query, max_num_fields=3)
+                    plan = album_metadata.prepare(db, int(params.get("track", [0])[0]), int(params.get("release", [0])[0]),
+                                                  params.get("artwork") == ["1"])
+                    approval = issue_approval(("metadata",), plan)
+                    self.reply_json({"approval": approval, "tags": plan["tags"], "artwork": bool(plan["picture"]),
+                                     "skipped": plan["skipped"],
+                                     "files": [{"path": str(path), "before": before}
+                                               for _, path, _, before in plan["files"]]})
+                    return
+                if parts == ["api", "metadata-apply"]:
+                    self.body_length(0)
+                    plan = consume_approval(self.headers.get("X-Spliff-Approval"), ("metadata",))
+                    self.reply_json(album_metadata.install(db, plan))
                     return
                 if parts == ["api", "upgrade-options"]:
                     self.body_length(0)

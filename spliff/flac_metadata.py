@@ -66,7 +66,7 @@ def music_tags(source):
             for key, separator, value in (entry.partition(b"=") for entry in entries) if separator}
 
 
-def write_tags(source, destination, tags):
+def write_tags(source, destination, tags, picture=None):
     blocks, audio_offset = header(source)
     vendor, entries = comments(source, blocks)
     keys = {name.encode("ascii") for name in tags}
@@ -78,11 +78,14 @@ def write_tags(source, destination, tags):
         raise ValueError("The updated FLAC tags exceed the format limit.")
     blocks = [block for block in blocks if block[0] != 4]
     blocks.append((4, None, len(payload)))
+    if picture:
+        blocks = [block for block in blocks if block[0] != 6 or not front_cover(source, block)]
+        blocks.append((6, None, len(picture)))
     destination.write(b"fLaC")
     for index, (kind, offset, size) in enumerate(blocks):
         destination.write(bytes([kind | (128 if index == len(blocks) - 1 else 0)]) + size.to_bytes(3, "big"))
         if offset is None:
-            destination.write(payload)
+            destination.write(picture if kind == 6 else payload)
         else:
             source.seek(offset)
             block = source.read(size)
@@ -91,3 +94,18 @@ def write_tags(source, destination, tags):
             destination.write(block)
     source.seek(audio_offset)
     shutil.copyfileobj(source, destination, 1024 * 1024)
+
+
+def front_cover(source, block):
+    source.seek(block[1])
+    return source.read(4) == struct.pack(">I", 3)
+
+
+def cover_block(data):
+    if data.startswith(b"\xff\xd8\xff"):
+        mime = b"image/jpeg"
+    elif data.startswith(b"\x89PNG\r\n\x1a\n"):
+        mime = b"image/png"
+    else:
+        raise ValueError("Discogs did not provide JPEG or PNG artwork.")
+    return struct.pack(">II", 3, len(mime)) + mime + struct.pack(">6I", 0, 0, 0, 0, 0, len(data)) + data

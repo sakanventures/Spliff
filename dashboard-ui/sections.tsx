@@ -7,13 +7,16 @@ export function Navigation() {
     <nav className="workspace-nav" aria-label="Spliff views">
       <div className="workspace-views">
         <Button id="albums" type="button" variant="ghost" aria-pressed="true">Recommended</Button>
-        <Button id="downloads" type="button" variant="ghost" aria-pressed="false">Activity</Button>
       </div>
       <div id="advanced" hidden>
-        <Button id="browse" type="button" variant="ghost" aria-pressed="false">Track index</Button>
+        <Button id="browse" type="button" variant="ghost" aria-pressed="false">Find tracks</Button>
+        <Button id="metadata" type="button" variant="ghost" aria-pressed="false">Metadata</Button>
         <Button id="staged" type="button" variant="ghost" aria-pressed="false">Saved reviews</Button>
       </div>
-      <Button id="sync" type="button" variant="ghost" aria-pressed="false">Settings</Button>
+      <div className="workspace-utilities">
+        <Button id="downloads" type="button" variant="ghost" aria-pressed="false">Activity</Button>
+        <Button id="sync" type="button" variant="ghost" aria-pressed="false">Settings</Button>
+      </div>
     </nav>
   )
 }

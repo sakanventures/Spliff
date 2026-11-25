@@ -145,7 +145,7 @@ function view(page) {
   window.webkit?.messageHandlers?.spliffMac?.postMessage("reviewClosed");
   document.body.dataset.view = page;
   for (const [id, key, panel] of [['sync', 'sync', 'sync-panel'], ['albums', 'albums', 'albums-panel'], ['browse', 'tracks', 'index'],
-    ['staged', 'reviews', 'review-panel'], ['downloads', 'downloads', 'downloads-panel']]) {
+    ['staged', 'reviews', 'review-panel'], ['metadata', 'metadata', 'metadata-panel'], ['downloads', 'downloads', 'downloads-panel']]) {
     get(id).setAttribute('aria-pressed', page === key);
     get(panel).hidden = page !== key;
   }
@@ -154,6 +154,7 @@ function view(page) {
   if (page === 'albums' && !get('album-library').hidden) loadAlbums();
   if (page === 'tracks') { refreshSummary(); loadTracks(); }
   if (page === 'reviews') loadReviews();
+  if (page === 'metadata') loadMetadataAlbums();
   if (page === 'downloads') {
     showDownloadList();
     loadDownloads();
@@ -184,19 +185,22 @@ function albumCaption(album) {
 async function loadAlbums() {
   const request = ++albumRequest;
   const query = get('album-query').value.trim();
+  const recommended = !query && !choosingDownloadOriginal;
+  get('refresh-recommended').hidden = !recommended || filePreview;
   const list = get('album-list');
   const status = get('album-status');
   status.textContent = 'Finding albums…';
   list.replaceChildren();
   try {
-    const {items, more, has_library: hasLibrary} = await api('/api/albums?' + new URLSearchParams({q: query}));
+    const {items: results, more, has_library: hasLibrary} = await api('/api/albums?' + new URLSearchParams({q: query, recommended: recommended ? "1" : "0"}));
     if (request !== albumRequest) return;
 
+    const items = recommended ? results.slice(0, 5) : results;
     get('album-filter').hidden = !hasLibrary;
     get('library-empty').hidden = hasLibrary;
     status.textContent = !hasLibrary ? '' : !items.length ?
       (query ? 'No albums match your search.' : 'No indexed MP3 albums. Choose a folder to add one.') :
-      more ? 'Showing the first 25 albums. Search to narrow the list.' : '';
+      more && !recommended ? 'Showing the first 25 albums. Search to narrow the list.' : '';
     list.replaceChildren(...items.map(album => {
       const row = element('li');
       const title = element('div');
@@ -215,7 +219,14 @@ async function loadAlbums() {
           openAlbumSearch(album);
         }
       });
-      row.append(title, button);
+      const cover = element('span', '', 'album-cover');
+      const image = element('img');
+      image.alt = '';
+      image.hidden = true;
+      image.addEventListener('load', () => { image.hidden = false; });
+      image.src = '/api/library-cover?' + new URLSearchParams({track: album.id});
+      cover.append(image);
+      row.append(cover, title, button);
       return row;
     }));
   } catch (error) {
@@ -247,7 +258,6 @@ function showAlbumLibrary(comparing = false) {
   get('album-library').hidden = false;
   get('album-search').hidden = true;
   view('albums');
-  if (!get('album-filter').hidden) get('album-query').focus();
 }
 
 async function queueAlbum(candidate, album) {
@@ -272,7 +282,131 @@ async function queueAlbum(candidate, album) {
   }
 }
 
-get('album-filter').addEventListener('submit', event => { event.preventDefault(); loadAlbums(); });
+let albumFilterTimer;
+get('album-query').addEventListener('input', () => {
+  albumRequest++;
+  clearTimeout(albumFilterTimer);
+  albumFilterTimer = setTimeout(() => {
+    if (document.body.dataset.view === 'albums' && !get('album-library').hidden) loadAlbums();
+  }, 180);
+});
+get('album-filter').addEventListener('submit', event => {
+  event.preventDefault();
+  clearTimeout(albumFilterTimer);
+  loadAlbums();
+});
+let metadataRequest = 0;
+let metadataTrack;
+let metadataTimer;
+const metadataStatus = get('metadata-status');
+
+async function loadMetadataAlbums() {
+  const request = ++metadataRequest;
+  const list = get('metadata-albums');
+  metadataTrack = null;
+  get('metadata-editions').hidden = get('metadata-plan').hidden = true;
+  metadataStatus.textContent = 'Finding FLAC albums…';
+  try {
+    const query = new URLSearchParams({q: get('metadata-query').value.trim()});
+    const {items} = await api('/api/metadata-albums?' + query);
+    if (request !== metadataRequest) return;
+    list.replaceChildren(...items.map(album => {
+      const row = element('li');
+      const title = element('div');
+      title.append(element('strong', album.album), element('small', album.artist, 'muted'),
+        element('small', album.folder, 'muted'));
+      const choose = element('button', 'Choose album');
+      choose.addEventListener('click', () => loadMetadataEditions(album));
+      row.append(title, choose);
+      return row;
+    }));
+    list.hidden = false;
+    metadataStatus.textContent = items.length ? '' : 'No matching FLAC albums.';
+  } catch (error) {
+    if (request === metadataRequest) metadataStatus.textContent = error.message;
+  }
+}
+
+async function loadMetadataEditions(album) {
+  const request = ++metadataRequest;
+  metadataTrack = album.id;
+  get('metadata-albums').hidden = true;
+  get('metadata-editions').hidden = get('metadata-plan').hidden = true;
+  metadataStatus.textContent = 'Looking up Discogs editions…';
+  try {
+    const {items} = await api('/api/metadata-editions?' + new URLSearchParams({track: album.id}));
+    if (request !== metadataRequest) return;
+    get('metadata-album').textContent = album.album;
+    get('metadata-release').replaceChildren(option('Choose an edition', ''),
+      ...items.map(release => option([release.title, release.year, release.country,
+        release.catno].filter(Boolean).join(' · '), release.id)));
+    get('metadata-editions').hidden = !items.length;
+    metadataStatus.textContent = items.length ? '' : 'No matching editions on Discogs.';
+  } catch (error) {
+    if (request === metadataRequest) metadataStatus.textContent = error.message;
+  } finally {
+    if (request === metadataRequest && get('metadata-editions').hidden) get('metadata-albums').hidden = false;
+  }
+}
+
+get('metadata').addEventListener('click', () => view('metadata'));
+get('metadata-query').addEventListener('input', () => {
+  metadataRequest++;
+  clearTimeout(metadataTimer);
+  metadataTimer = setTimeout(loadMetadataAlbums, 180);
+});
+get('metadata-form').addEventListener('change', () => {
+  metadataRequest++;
+  get('metadata-plan').hidden = true;
+  metadataStatus.textContent = '';
+});
+get('metadata-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  const request = ++metadataRequest;
+  const preview = get('metadata-plan');
+  preview.hidden = true;
+  metadataStatus.textContent = 'Preparing tag changes…';
+  try {
+    const query = new URLSearchParams({track: metadataTrack, release: get('metadata-release').value,
+      artwork: get('metadata-artwork').checked ? '1' : '0'});
+    const plan = await action('/api/metadata-plan?' + query);
+    if (request !== metadataRequest) return;
+    const files = element('ul');
+    for (const file of plan.files) {
+      const old = Object.entries(file.before).filter(([, value]) => value)
+        .map(([key, value]) => key + ' ' + value);
+      const item = element('li', file.path);
+      if (old.length) item.append(element('small', old.join(' · '), 'muted'));
+      files.append(item);
+    }
+    const save = element('button', 'Save tags', 'primary');
+    save.addEventListener('click', async click => {
+      if (!click.isTrusted) return;
+      save.disabled = true;
+      metadataStatus.textContent = 'Writing verified copies…';
+      try {
+        const result = await action('/api/metadata-apply', '', {'X-Spliff-Approval': plan.approval});
+        if (request !== metadataRequest) return;
+        preview.hidden = true;
+        metadataStatus.textContent = 'Updated ' + result.updated + ' tracks.' + (result.error ? ' ' + result.error : '');
+      } catch (error) {
+        if (request === metadataRequest) metadataStatus.textContent = error.message;
+      }
+    });
+    const trackDetails = element('details');
+    trackDetails.append(element('summary', plan.files.length + ' tracks to update'), files);
+    preview.replaceChildren(element('h2', 'Review metadata'),
+      element('p', [plan.tags.ALBUM, plan.tags.ARTIST, plan.tags.DATE].filter(Boolean).join(' · ')),
+      element('p', plan.artwork ? 'Discogs front cover will be embedded.' : 'Existing artwork stays in place.'),
+      element('p', plan.skipped ? plan.skipped + ' tracks will be skipped.' : ''),
+      trackDetails, save);
+    preview.hidden = false;
+    metadataStatus.textContent = '';
+  } catch (error) {
+    if (request === metadataRequest) metadataStatus.textContent = error.message;
+  }
+});
+
 get('album-back').addEventListener('click', () => showAlbumLibrary());
 get('soulseek-form').addEventListener('submit', async event => {
   event.preventDefault();
@@ -370,12 +504,36 @@ function selectDownload(job, open = false) {
   refreshDownload();
 }
 
+const clearedActivity = new Set(JSON.parse(localStorage.getItem('spliff-cleared-activity') || '[]'));
+let visibleHistory = [];
+
+function renderActivity(history) {
+  visibleHistory = history.filter(item => !clearedActivity.has(item.candidate + ':' + item.created));
+  get('clear-activity').hidden = !visibleHistory.length;
+  get('activity-history').replaceChildren(...visibleHistory.map(item => {
+    const title = item.destination.split('/').filter(Boolean).pop();
+    const label = {keep: 'Kept both', replace: 'Replaced', import: 'Added to library'}[item.mode];
+    const row = element('p', label + ' · ' + title);
+    row.title = item.destination;
+    return row;
+  }));
+}
+
+get('clear-activity').addEventListener('click', () => {
+  for (const item of visibleHistory) clearedActivity.add(item.candidate + ':' + item.created);
+  localStorage.setItem('spliff-cleared-activity', JSON.stringify([...clearedActivity]));
+  renderActivity([]);
+});
+
+get('refresh-recommended').addEventListener('click', loadAlbums);
+
 async function loadDownloads(selected, quiet = false) {
   const request = ++downloadListRequest;
   clearTimeout(downloadTimer);
   try {
-    const {items} = await api('/api/downloads');
+    const {items, history = []} = await api('/api/downloads');
     if (request !== downloadListRequest) return;
+    renderActivity(history);
     if (quiet && !selected && JSON.stringify(items) === JSON.stringify(downloadJobs)) return;
     downloadJobs = items;
     const list = get('download-list');
@@ -393,7 +551,7 @@ async function loadDownloads(selected, quiet = false) {
       });
       return button;
     }));
-    if (!items.length) {
+    if (!items.length && !visibleHistory.length) {
       list.append(element('p', 'Downloads will appear here after Spliff finds a suitable offer.', 'download-empty'));
     }
     const job = items.find(item => item.id === (selected || selectedDownload?.id)) || items[0];
@@ -588,8 +746,8 @@ get('queue-form').addEventListener('submit', async event => {
     if (result.state === 'applied') {
       get('queue-status').textContent = 'This transfer was already installed.';
     } else {
-      get('queue-status').textContent = 'Sent to Nicotine+. It will appear here when complete.';
-      await loadDownloads(result.id, true);
+      get('queue-status').textContent = 'Sent to Nicotine+. Track its progress in Activity.';
+      view('downloads');
     }
   } catch (error) {
     get('queue-status').textContent = error.message;
@@ -1025,7 +1183,6 @@ get('add-library').addEventListener('click', scanMusic);
 const companion = Boolean(window.webkit?.messageHandlers?.spliffMac);
 if (companion) {
   document.documentElement.classList.add('companion');
-  get('browse').textContent = 'Find individual tracks';
   get('staged').textContent = 'Saved file comparisons';
 }
 get('download-comparison-control').append(get('choose-original'));

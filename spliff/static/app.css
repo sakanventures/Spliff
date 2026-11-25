@@ -431,3 +431,33 @@ main, .companion main,
 .settings-options { display: grid; gap: 20px; margin-block: 24px; }
 .settings-options form { display: flex; flex-wrap: wrap; align-items: end; gap: 16px; }
 html:not(.advanced-mode) #manual-download { display: none; }
+
+.recommended-heading, .download-sidebar-heading { display: flex; align-items: center; gap: 12px; }
+#refresh-recommended { font-size: 1.3rem; line-height: 1; padding: 8px 10px; }
+.album-list li > div { flex: 1; min-width: 0; }
+.album-cover { width: 44px; height: 44px; flex: none; background: var(--dashboard-surface); border-radius: 6px; overflow: hidden; }
+.album-cover img { width: 100%; height: 100%; object-fit: cover; }
+#manual-download { margin-block: 18px; }
+#clear-activity { margin-inline-start: auto; }
+#activity-history p { padding-block: 12px; border-bottom: 1px solid var(--edge); margin: 0; overflow-wrap: anywhere; }
+.workspace-views { background: transparent; border: 0; padding: 0; }
+.workspace-nav button[aria-pressed="false"] { color: var(--dashboard-foreground); background: transparent; border-color: transparent; }
+.workspace-nav button[aria-pressed="true"] { color: var(--selection-ink); background: var(--selection); border-color: transparent; }
+
+.workspace-utilities { display: flex; gap: 4px; margin-inline-start: auto; }
+#album-filter label { width: 100%; }
+#album-query { background: var(--control); }
+:is(#album-query, #search, #scope):focus { outline: none; border-color: var(--accent); }
+#filters .track-scope { flex: 0 1 auto; align-self: end; }
+.track-scope select { width: auto; max-width: 100%; background: var(--dashboard-surface); }
+html:not(.advanced-mode) :is(#sync-details, #download-details, #inline-options details) { display: none; }
+
+.album-list button.primary { background: var(--accent); color: var(--dashboard-on-accent); }
+.album-list button.primary:not(:disabled):hover { background: var(--accent-hover); }
+#metadata-query { max-width: 44rem; }
+#metadata-editions, #metadata-plan { margin-block: 24px; }
+#metadata-form { display: flex; flex-wrap: wrap; align-items: end; gap: 16px; }
+#metadata-form input[type="checkbox"] { width: auto; }
+#metadata-plan li { overflow-wrap: anywhere; }
+#metadata-plan li small { display: block; }
+#metadata-plan details { margin-block: 12px; }

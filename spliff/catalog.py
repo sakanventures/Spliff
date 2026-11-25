@@ -1,6 +1,7 @@
 """SQLite catalog and local audio inspection."""
 import json
 import os
+import re
 import shutil
 import sqlite3
 import stat
@@ -187,25 +188,34 @@ def contains_pattern(query):
     return "%" + query.replace("!", "!!").replace("%", "!%").replace("_", "!_") + "%"
 
 
-def albums(db, query=""):
+def metadata_album_folder(path):
+    folder = Path(path).parent
+    return str(folder.parent if re.fullmatch(r"(?:disc|cd)[ _-]*[0-9]+", folder.name, re.I) else folder)
+
+
+def albums(db, query="", *, recommended=False, metadata=False):
     if not isinstance(query, str) or len(query) > 300:
         raise ValueError("Invalid album search")
     pattern = contains_pattern(query.strip())
     with closing(connect(db)) as connection:
-        connection.create_function("album_folder", 1, lambda path: path.rpartition("/")[0])
-        rows = connection.execute("""
+        connection.create_function("album_folder", 1, metadata_album_folder if metadata
+                                   else lambda path: path.rpartition("/")[0])
+        order = "random()" if recommended else "album COLLATE NOCASE, id"
+        limit = 5 if recommended else 25
+        eligible = "sum(codec='flac' AND protected=0) > 0" if metadata else "sum(codec='mp3') > 0"
+        rows = connection.execute(f"""
             SELECT min(id) AS id, root, album, min(nullif(artist,'')) AS artist, album_folder(path) AS folder,
                    count(*) AS total, sum(codec='mp3') AS mp3, sum(protected) AS protected
             FROM tracks
             WHERE present=1 AND error IS NULL AND nullif(trim(album),'') IS NOT NULL
             GROUP BY root, album COLLATE NOCASE, album_folder(path)
-            HAVING sum(codec='mp3') > 0 AND (album LIKE ? ESCAPE '!'
+            HAVING {eligible} AND (album LIKE ? ESCAPE '!'
                 OR max(coalesce(artist,'') LIKE ? ESCAPE '!') OR folder LIKE ? ESCAPE '!')
-            ORDER BY album COLLATE NOCASE, id
-            LIMIT 26
-        """, (pattern, pattern, pattern)).fetchall()
+            ORDER BY {order}
+            LIMIT ?
+        """, (pattern, pattern, pattern, limit + 1)).fetchall()
         has_library = bool(connection.execute("SELECT 1 FROM roots LIMIT 1").fetchone())
-    return {"items": [dict(row) for row in rows[:25]], "more": len(rows) > 25, "has_library": has_library}
+    return {"items": [dict(row) for row in rows[:limit]], "more": len(rows) > limit, "has_library": has_library}
 
 
 def tracks(db, query="", scope="all", limit=40, after=0):

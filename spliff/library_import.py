@@ -318,11 +318,13 @@ def preview(plan):
     }
 
 
-def write_tagged_copy(raw, raw_sig, path, tags, identities):
+def write_tagged_copy(raw, raw_sig, path, tags, identities, picture=None, *, preserve_mode=False):
     with read_pinned(raw, raw_sig, identities) as source, keep_both.open_directory(path.parent, identities) as parent:
         descriptor = os.open(path.name, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=parent)
         with os.fdopen(descriptor, "w+b") as output:
-            flac_metadata.write_tags(source, output, tags)
+            flac_metadata.write_tags(source, output, tags, picture)
+            if preserve_mode:
+                os.fchmod(descriptor, os.fstat(source.fileno()).st_mode & 0o777)
             output.flush()
             os.fsync(descriptor)
             output.seek(0)
