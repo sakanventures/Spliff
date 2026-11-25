@@ -340,7 +340,7 @@ def write_tagged_copy(raw, raw_sig, path, tags, identities, picture=None, *, pre
             return keep_both.audio_digest(output), signature(os.fstat(descriptor))
 
 
-def apply(db, reviewed):
+def apply(db, reviewed, *, receipt=None):
     plan = prepare(db, reviewed["candidate"], reviewed["root"], reviewed["identity"],
                    reviewed["details"], reviewed["edition"])
     if keep_both.plan_token(plan) != keep_both.plan_token(reviewed):
@@ -401,6 +401,7 @@ def apply(db, reviewed):
                       "staging_path": plan["staging"], "recovery_path": str(work)}
             connection.execute("INSERT INTO kept_albums(candidate,destination,mode) VALUES (?,?,'import')",
                                (plan["candidate"], plan["destination"]))
+            result.update(receipt or {})
             connection.execute("INSERT INTO upgrade_results VALUES (?,?)", (plan["candidate"], json.dumps(result)))
             connection.commit()
         except BaseException:

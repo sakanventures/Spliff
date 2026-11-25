@@ -2,18 +2,19 @@
 import json
 import sqlite3
 import sys
+from uuid import uuid4
 from urllib.parse import urlencode
 
 from .catalog import replacement_preference, stats, tracks
 from .discogs import release_details, search_releases
 from .discogs_auth import connect_discogs
 from .review import reviews
-from .nicotine import TransferError, transfer_readiness
+from .nicotine import TransferError, request as nicotine_request, transfer_readiness
 from .nicotine import search as search_nicotine
 from .staged_downloads import applied_transfer, list_downloads, queue, review_download, transfer_status as read_transfer_status
 from .spectral import analyze_track, analyze_download
-from . import keep_both, sync
-from .staged_downloads import public_status
+from . import album_actions, album_rollback, keep_both, sync
+from .staged_downloads import local_transfer, public_status
 from .candidates import refresh as refresh_candidate
 from .artist import library as artist_library, upgrades as artist_upgrades, index_folder, search_for_chat
 
@@ -21,8 +22,32 @@ from .artist import library as artist_library, upgrades as artist_upgrades, inde
 ALBUM_CHOICE = "Keep both versions or replace the matched originals?"
 
 
-def review_for_chat(db, candidate_id, original_track_id=None, *, dashboard_port=8765):
+def review_for_chat(db, candidate_id, original_track_id=None, *, dashboard_port=8765, host_confirmation=False):
     result = review_download(db, candidate_id, original_track_id)
+    if host_confirmation and result["items"] and result["complete"] == len(result["items"]) and not result["kept_both"]:
+        original = result["comparison"]["original_track_id"] if result["comparison"] else None
+        options, blocked, diagnostics = {}, {}, {}
+        modes = ("keep", "replace") if original else ("keep",)
+        for mode in modes:
+            try:
+                options[mode] = album_actions.preview(db, candidate_id, mode, original)
+            except (ValueError, OSError) as exc:
+                blocked[mode] = str(exc)
+                if isinstance(exc, keep_both.RecordingReviewBlocked):
+                    diagnostics[mode] = exc.skipped
+        result["album_decision"] = {"question": ALBUM_CHOICE if original else "Add this release to the library?",
+                                    "options": options, "blocked": blocked, "original_track_id": original,
+                                    "advanced_diagnostics": diagnostics}
+        result["review_summary"] = {
+            "release": result["comparison"]["album"] if original else None,
+            "existing_formats": quality_counts([*result["originals_without_match"],
+                                               *(item["original"] for item in result["items"] if item.get("original"))]),
+            "download_formats": quality_counts(item["audio"] for item in result["items"] if item.get("audio")),
+            "eligible_replacements": options.get("replace", {}).get("count", 0),
+            "additional_track_candidates": [item["name"] for item in result["items"]
+                                            if original and item.get("assessment") == "no matching title"],
+        }
+        return result
     if (result["items"] and result["complete"] == len(result["items"])
             and not result["kept_both"] and result["comparison"]):
         original = result["comparison"]["original_track_id"]
@@ -47,6 +72,19 @@ def review_for_chat(db, candidate_id, original_track_id=None, *, dashboard_port=
     return result
 
 
+def quality_counts(items):
+    counts, seen = {}, set()
+    for item in items:
+        identifier = item.get("id")
+        if identifier is not None:
+            if identifier in seen:
+                continue
+            seen.add(identifier)
+        codec = item.get("codec") or "unknown"
+        counts[codec] = counts.get(codec, 0) + 1
+    return counts
+
+
 def queue_for_chat(db, candidate_id=None, original_track_id=None):
     return queue(db, candidate_id, original_id=original_track_id, source="mcp")
 
@@ -54,12 +92,87 @@ def queue_for_chat(db, candidate_id=None, original_track_id=None):
 def transfer_status(db, candidate_id=None):
     if applied := applied_transfer(db, candidate_id):
         return applied
-    return public_status({key: value for key, value in read_transfer_status(candidate_id).items()
-                          if key != "entries"})
+    result = public_status({key: value for key, value in read_transfer_status(candidate_id).items()
+                            if key != "entries"})
+    states = {"Finished": "completed", "Queued": "queued", "Transferring": "transferring",
+              "User logged off": "peer_offline", "File not shared": "unavailable",
+              "Paused": "paused", "Connection closed": "interrupted", "Connection timeout": "interrupted",
+              "Download folder error": "local_configuration_failure", "Local file error": "local_file_error"}
+    for item in result["items"]:
+        item["state"] = states.get(item["status"], "unknown")
+    observed = {item["state"] for item in result["items"]}
+    result["state"] = next(iter(observed)) if len(observed) == 1 else "mixed" if observed else "unknown"
+    if observed - {"completed", "queued", "transferring"}:
+        result["recovery"] = {"check_connection": "spliff_transfer_readiness",
+                              "find_alternatives": "find_nicotine_alternatives"}
+        if "paused" in observed:
+            result["recovery"]["authorize_manual_retry"] = "authorize_nicotine_retry"
+    return result
 
 
-def preview_album_action(db, candidate_id=None, original_track_id=None, mode=None):
-    return public_plan(keep_both.preview(db, candidate_id, original_track_id, mode))
+def find_nicotine_alternatives(db, candidate_id):
+    current = local_transfer(candidate_id)
+    candidates = search_nicotine(db, current["query"], kind=current["kind"])
+    candidates["candidates"] = [item for item in candidates["candidates"] if item["candidate_id"] != candidate_id]
+    candidates["review_required"] = "Verify the edition and recording after staging a newly selected candidate."
+    return candidates
+
+
+def authorize_nicotine_retry(db, candidate_id):
+    if applied_transfer(db, candidate_id):
+        raise ValueError("This transfer has already been applied.")
+    result = nicotine_request("authorize_recovery", selections=[candidate_id])
+    return {**result, "next_step": "Resume the exact authorized paused rows in Nicotine+. "
+                                   "Check nicotine_transfer_status first if their state has changed."}
+
+
+def confirm_album_action(review, incoming, parent_id):
+    request_id = f"spliff-confirm-{uuid4().hex}"
+    label = {"replace": "Replace", "keep": "Keep both / Add to library",
+             "rollback": "Roll back this replacement"}[review["mode"]]
+    paths = []
+    for file in review["files"]:
+        if review["mode"] == "rollback":
+            paths.extend([f'Restore {file["archive"]} to {file["original"]}',
+                          f'Retain {file["install"]} at {file["recover_download"]}'])
+            continue
+        paths.append(f'Install {file["install"]}')
+        if review["mode"] == "replace":
+            paths.append(f'Archive {file["original"]} to {file["archive"]}')
+            evidence = file.get("recording_evidence") or {}
+            if evidence.get("overridden"):
+                paths.append("Recording identity is unresolved. Approval accepts this exception. "
+                             + json.dumps(evidence))
+    message = f"Authorize Spliff to {label}?\n" + "\n".join(paths)
+    print(json.dumps({"jsonrpc": "2.0", "id": request_id, "method": "elicitation/create",
+                      "params": {"mode": "form", "message": message,
+                                 "requestedSchema": {"type": "object", "properties": {
+                                     "authorize": {"type": "boolean", "title": "Authorize these exact file operations",
+                                                   "default": False}},
+                                     "required": ["authorize"]}}}), flush=True)
+    for line in incoming:
+        try:
+            packet = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(packet, dict) or packet.get("jsonrpc") != "2.0":
+            continue
+        if packet.get("method") == "notifications/cancelled":
+            params = packet.get("params")
+            if isinstance(params, dict) and params.get("requestId") == parent_id:
+                return False
+        if packet.get("id") == request_id and "method" not in packet:
+            result = packet.get("result")
+            if "error" in packet or not isinstance(result, dict) or result.get("action") != "accept":
+                return False
+            content = result.get("content")
+            return isinstance(content, dict) and content == {"authorize": True} and content["authorize"] is True
+        if "id" in packet and "method" in packet:
+            if packet["method"] == "ping":
+                respond(packet["id"], {})
+            else:
+                respond(packet["id"], error=(-32000, "An album action is awaiting user confirmation."))
+    return False
 
 
 def public_plan(plan):
@@ -126,10 +239,20 @@ DOWNLOAD_TOOLS = [
     ("nicotine_transfer_status", "Read progress/status for a selected staged candidate. The returned id "
      "is the transfer ID. This does not inspect or change library files.",
      {"candidate_id": {"type": "string"}}, transfer_status),
+    ("find_nicotine_alternatives", "Search again using a staged transfer's saved release query. "
+     "Ask the user to select a fresh candidate before staging.",
+     {"candidate_id": {"type": "string"}}, find_nicotine_alternatives),
+    ("authorize_nicotine_retry", "Permit manual retry of the exact paused files from a staged transfer. "
+     "This does not queue, resume or duplicate transfers.",
+     {"candidate_id": {"type": "string"}}, authorize_nicotine_retry),
     ("preview_album_action", "Prepare one mode and its exact destinations before asking the user "
      "to choose. For routine use, review_nicotine_download returns both reviewed plans together.",
      {"candidate_id": {"type": "string"}, "original_track_id": {"type": "integer", "minimum": 1},
-      "mode": {"enum": ["keep", "replace"]}}, preview_album_action),
+      "mode": {"enum": ["keep", "replace"]}, "library_root": {"type": "string"},
+      "override_track_ids": {"type": "array", "maxItems": 50, "uniqueItems": True,
+                             "items": {"type": "integer", "minimum": 1}}}, album_actions.preview),
+    ("get_album_action_status", "Read the committed album action and its recovery information.",
+     {"candidate_id": {"type": "string"}}, album_actions.status),
     ("analyze_download_spectrum", "Generate a spectrogram for one completed download and its matched "
      "original when available. Review before Keep both or Replace. Index is zero-based. "
      "Do not infer genuine lossless provenance from spectral content alone.",
@@ -147,11 +270,26 @@ DOWNLOAD_TOOLS = [
      queue_for_chat),
     ("review_nicotine_download",
      "Review the completed download from list_nicotine_transfers. Return reviewed Keep both and Replace "
-     "plans or an Add to library link for a first-time download. Give the user the local link to review "
-     "and approve on their Mac.",
+     "plans. Show exact destinations and recording discrepancies before the user chooses. "
+     "Use the approval method returned by this session.",
      {"candidate_id": {"type": "string"}, "original_track_id": {"type": "integer", "minimum": 1}},
      review_for_chat),
 ]
+APPLY_TOOL = (
+    "apply_album_action",
+    "Execute the selected, unexpired album action after the user chooses it. Spliff sends a host "
+    "confirmation form showing the exact reviewed paths. Pass the plan ID from the selected option.",
+    {"candidate_id": {"type": "string"}, "original_track_id": {"type": "integer", "minimum": 1},
+     "mode": {"enum": ["keep", "replace"]}, "plan_id": {"type": "string", "minLength": 32, "maxLength": 32}},
+    album_actions.apply,
+)
+
+ROLLBACK_TOOL = (
+    "rollback_album_action", "Restore hidden-archive originals for a completed replacement. Use its "
+    "transaction ID from get_album_action_status. Spliff requests host confirmation for the exact paths.",
+    {"candidate_id": {"type": "string"}, "transaction_id": {"type": "string"}}, album_rollback.rollback,
+)
+
 DISCOGS_TOOLS = [
     ("connect_discogs",
      "Start Discogs sign-in only if the user asks to connect. Present the authorization URL as a link "
@@ -171,17 +309,21 @@ DISCOGS_TOOLS = [
 REQUIRED = {"search_nicotine": ["query"], "search_discogs_releases": ["artist", "title"],
             "nicotine_transfer_status": ["candidate_id"],
             "refresh_nicotine_candidate": ["candidate_id"],
-            "preview_album_action": ["candidate_id", "original_track_id", "mode"],
+            "find_nicotine_alternatives": ["candidate_id"], "authorize_nicotine_retry": ["candidate_id"],
+            "preview_album_action": ["candidate_id", "mode"],
+            "apply_album_action": ["candidate_id", "mode", "plan_id"],
+            "rollback_album_action": ["candidate_id", "transaction_id"],
+            "get_album_action_status": ["candidate_id"],
             "artist_library": ["artist"], "search_artist_upgrades": ["artist"],
             "index_music_folder": ["folder"], "sync_music_folder": ["folder"],
             "analyze_library_spectrum": ["track_id"], "analyze_download_spectrum": ["candidate_id"],
             "get_discogs_release": ["release_id"], "stage_nicotine_download": ["candidate_id"],
             "review_nicotine_download": ["candidate_id"]}
 WRITES = {"stage_nicotine_download", "connect_discogs", "replacement_preference", "index_music_folder",
-          "sync_music_folder", "review_nicotine_download", "preview_album_action"}
+          "sync_music_folder", "review_nicotine_download", "preview_album_action", "apply_album_action", "rollback_album_action", "authorize_nicotine_retry"}
 OPEN_WORLD = {"search_nicotine", "search_discogs_releases", "get_discogs_release",
               "refresh_nicotine_candidate", "nicotine_transfer_status",
-              "search_artist_upgrades",
+              "search_artist_upgrades", "find_nicotine_alternatives",
               "stage_nicotine_download", "connect_discogs", "sync_music_folder"}
 
 VERSIONS = {"2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25"}
@@ -193,9 +335,9 @@ def serve(db, search_only=False, allow_downloads=False, allow_discogs=False, das
         "Search only; peer claims and edition matches require review.",
         {**NICOTINE_TOOL[2], "kind": {"enum": ["auto", "artist", "track", "album"]}}, search_for_chat)
     available = [NICOTINE_TOOL] if search_only else [*TOOLS, local_search]
-    if allow_downloads:
+    if allow_downloads and not search_only:
         available.extend(DOWNLOAD_TOOLS)
-    if allow_discogs:
+    if allow_discogs and not search_only:
         available.extend(DISCOGS_TOOLS)
     if search_only:
         instructions = "This connection is remote search-only and cannot inspect the local music library."
@@ -206,13 +348,16 @@ def serve(db, search_only=False, allow_downloads=False, allow_discogs=False, das
                         "Use spliff_transfer_readiness when staging is blocked and give the user its local Settings link. "
                         "Only the user can change transfer permission in Settings. "
                         "Discover existing transfers with list_nicotine_transfers. Handle candidate IDs internally. "
-                        "Present the reviewed options and destinations from review_nicotine_download and give "
-                        "the user its local approval link. For a new download use its Add to library link. "
+                        "Present reviewed choices and destinations from review_nicotine_download. Use apply_album_action "
+                        "when available, or the local approval link supplied by the review. "
                         "Read nicotine_transfer_status for the outcome.")
     else:
         instructions = "Use artist_library to inspect owned releases and index_music_folder for a selected folder."
     initialized = False
-    for line in sys.stdin:
+    incoming = iter(sys.stdin)
+    active_tools = available
+    host_confirmation = False
+    for line in incoming:
         request_id = None
         try:
             request = json.loads(line)
@@ -236,6 +381,15 @@ def serve(db, search_only=False, allow_downloads=False, allow_discogs=False, das
             if not isinstance(version, str):
                 respond(request_id, error=(-32602, "Protocol version required"))
                 continue
+            if initialized:
+                respond(request_id, error=(-32600, "The server was already initialized"))
+                continue
+            capabilities = params.get("capabilities", {})
+            elicitation = capabilities.get("elicitation") if isinstance(capabilities, dict) else None
+            host_confirmation = (allow_downloads and not search_only and version in {"2025-06-18", "2025-11-25"}
+                                 and isinstance(elicitation, dict)
+                                 and (not elicitation or isinstance(elicitation.get("form"), dict)))
+            active_tools = [*available, APPLY_TOOL, ROLLBACK_TOOL] if host_confirmation else available
             initialized = True
             respond(request_id, {
                 "protocolVersion": version if version in VERSIONS else "2025-11-25",
@@ -253,20 +407,26 @@ def serve(db, search_only=False, allow_downloads=False, allow_discogs=False, das
                  "inputSchema": {"type": "object", "properties": properties,
                                  "additionalProperties": False,
                                  **({"required": REQUIRED[name]} if name in REQUIRED else {})},
-                 "annotations": {"readOnlyHint": name not in WRITES, "openWorldHint": name in OPEN_WORLD}}
-                for name, description, properties, _ in available
+                 "annotations": {"readOnlyHint": name not in WRITES, "openWorldHint": name in OPEN_WORLD,
+                                 "destructiveHint": name in {"apply_album_action", "rollback_album_action"}}}
+                for name, description, properties, _ in active_tools
             ]})
         elif method == "tools/call":
             arguments = params.get("arguments", {})
-            tool = next((tool for tool in available if tool[0] == params.get("name")), None)
-            if not tool or not isinstance(arguments, dict) or arguments.keys() - tool[2].keys():
+            tool = next((tool for tool in active_tools if tool[0] == params.get("name")), None)
+            if not tool or not isinstance(arguments, dict) or arguments.keys() - tool[2].keys() or not set(
+                    REQUIRED.get(tool[0], ())).issubset(arguments):
                 respond(request_id, error=(-32602, "Unknown tool or invalid arguments"))
                 continue
             try:
                 if tool[3] is transfer_readiness:
                     payload = {**tool[3](), "settings_url": f"http://127.0.0.1:{dashboard_port}/?settings=1"}
                 elif tool[3] is review_for_chat:
-                    payload = review_for_chat(db, dashboard_port=dashboard_port, **arguments)
+                    payload = review_for_chat(db, dashboard_port=dashboard_port,
+                                              host_confirmation=host_confirmation, **arguments)
+                elif tool[3] in (album_actions.apply, album_rollback.rollback):
+                    payload = tool[3](db, **arguments,
+                                                  confirm=lambda review: confirm_album_action(review, incoming, request_id))
                 else:
                     payload = tool[3](db, **arguments)
                 if tool[0] in ("analyze_library_spectrum", "analyze_download_spectrum"):
@@ -279,13 +439,22 @@ def serve(db, search_only=False, allow_downloads=False, allow_discogs=False, das
                     result = {"content": content}
                 else:
                     result = {"content": [{"type": "text", "text": json.dumps(payload)}]}
+                    if tool[3] in (album_actions.preview, album_actions.apply, album_actions.status, album_rollback.rollback, review_for_chat):
+                        result["structuredContent"] = payload
             except TransferError as exc:
                 payload = {"code": exc.code, "message": str(exc),
                            "settings_url": f"http://127.0.0.1:{dashboard_port}/?settings=1"}
                 result = {"isError": True, "content": [{"type": "text", "text": json.dumps(payload)}]}
             except (ValueError, OSError, sqlite3.Error) as exc:
-                message = str(exc) if isinstance(exc, ValueError) else "Catalog unavailable"
-                result = {"isError": True, "content": [{"type": "text", "text": message}]}
+                if tool[3] in (album_actions.apply, album_rollback.rollback):
+                    message = str(exc) if isinstance(exc, (ValueError, OSError)) else "The catalog is busy or unavailable."
+                    payload = {"status": "action_stopped", "message": message,
+                               "recovery": "Check get_album_action_status and inspect any recovery journal before retrying."}
+                    result = {"isError": True, "structuredContent": payload,
+                              "content": [{"type": "text", "text": json.dumps(payload)}]}
+                else:
+                    message = str(exc) if isinstance(exc, ValueError) else "Catalog unavailable"
+                    result = {"isError": True, "content": [{"type": "text", "text": message}]}
             respond(request_id, result)
         else:
             respond(request_id, error=(-32601, "Method not found"))

@@ -16,6 +16,7 @@ from .catalog import connect, file_identity, replacement_destination, signature
 from .nicotine_bridge.downloads import selection_parts
 from .nicotine_bridge.wire import staging_root
 from .scanner import AUDIO_FIELDS
+from .recording_match import compare_recordings
 from .staged_downloads import MATCH_ASSESSMENTS, review_download
 from .spectral import analyze_file, compare_measurements
 
@@ -25,6 +26,12 @@ HIDDEN_ARCHIVE = ".spliff-originals"
 TRASH = "/usr/bin/trash"
 DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
 RECEIPT_NAME = "job.json"
+
+
+class RecordingReviewBlocked(ValueError):
+    def __init__(self, skipped):
+        super().__init__(skipped[-1]["reason"])
+        self.skipped = skipped
 
 
 @contextmanager
@@ -116,7 +123,7 @@ def staging_receipt_signature(job, pairs, identities):
         pass
 
 
-def get_plan(db, candidate, original, mode="keep"):
+def get_plan(db, candidate, original, mode="keep", *, strict=False, overrides=()):
     if mode not in ("keep", "replace"):
         raise ValueError("Choose Keep both or Replace.")
     if sys.platform != "darwin":
@@ -130,7 +137,16 @@ def get_plan(db, candidate, original, mode="keep"):
     if not items or review["complete"] != len(items) or not review["comparison"]:
         raise ValueError("Wait until the download finishes and Spliff identifies the original release.")
     skipped = []
-    matched = [item for item in items if item.get("assessment") in MATCH_ASSESSMENTS]
+    matched = [item for item in items if item.get("assessment") in MATCH_ASSESSMENTS or (
+        strict and item.get("assessment") in {"check duration", "check release tags"}
+        and item.get("original") and item["audio"]["quality"] == "lossless")]
+    if strict:
+        counts = {}
+        for item in items:
+            if item.get("original"):
+                key = item["original"]["id"]
+                counts[key] = counts.get(key, 0) + 1
+        matched = [item for item in matched if counts[item["original"]["id"]] == 1]
     skipped.extend({"download": item.get("name") or Path(item["source"]).name, "reason": item.get("assessment", "Audio inspection failed")}
                    for item in items if item not in matched)
     pairs = []
@@ -231,10 +247,27 @@ def get_plan(db, candidate, original, mode="keep"):
             original = analyze_file(pair["mp3"], pair["mp3_sig"])
             download = analyze_file(pair["flac"], pair["flac_sig"])
             evidence = compare_measurements(original, download)
-            if evidence["status"] in ("Different audio envelope", "Download appears silent"):
+            if evidence["status"] == "Download appears silent":
                 raise ValueError(evidence["status"])
-            if pair["assessment"] != "possible match" and evidence["status"] != "Similar audio envelope":
-                raise ValueError(pair["assessment"].capitalize() + ": audio did not resolve the discrepancy.")
+            if strict:
+                try:
+                    recording = compare_recordings(pair["mp3"], pair["mp3_sig"], pair["flac"], pair["flac_sig"])
+                except ValueError as exc:
+                    recording = {"matched": False, "reason": str(exc)}
+                verified = recording["matched"] and evidence["status"] != "Different audio envelope"
+                overridden = not verified and pair["id"] in overrides
+                if not verified and not overridden:
+                    skipped.append({"download": Path(pair["flac"]).name, "original_track_id": pair["id"],
+                                    "reason": "Recording identity is uncertain or conflicting",
+                                    "recording_evidence": recording, "audio_evidence": evidence})
+                    continue
+                pair["recording_evidence"] = {**recording, "confidence": "verified match" if verified else
+                                              "uncertain match", "overridden": overridden}
+            else:
+                if evidence["status"] == "Different audio envelope":
+                    raise ValueError(evidence["status"])
+                if pair["assessment"] != "possible match" and evidence["status"] != "Similar audio envelope":
+                    raise ValueError(pair["assessment"].capitalize() + ": audio did not resolve the discrepancy.")
             pair["evidence"] = evidence
             pair["original_digest"] = verified_digest(Path(pair["mp3"]), pair["mp3_sig"])
             pair["download_digest"] = verified_digest(Path(pair["flac"]), pair["flac_sig"])
@@ -242,8 +275,11 @@ def get_plan(db, candidate, original, mode="keep"):
             skipped.append({"download": Path(pair["flac"]).name, "reason": str(exc)})
         else:
             ready.append(pair)
+    if overrides and set(overrides) != {pair["id"] for pair in ready
+                                        if pair["recording_evidence"].get("overridden")}:
+        raise ValueError("Every exception must select an eligible track with unresolved recording evidence.")
     if not ready:
-        raise ValueError(skipped[-1]["reason"])
+        raise RecordingReviewBlocked(skipped)
     receipt_signature = staging_receipt_signature(job, ready, identities) if len(ready) == len(items) else None
     installed_ids = {pair["id"] for pair in ready}
     preserved = {track["path"] for track in review["originals_without_match"]
@@ -264,8 +300,8 @@ def plan_token(plan):
     return hashlib.sha256(json.dumps(plan, sort_keys=True).encode()).hexdigest()
 
 
-def preview(db, candidate, original, mode="keep"):
-    plan = get_plan(db, candidate, original, mode)
+def preview(db, candidate, original, mode="keep", *, strict=False, overrides=()):
+    plan = get_plan(db, candidate, original, mode, strict=strict, overrides=overrides)
     destination = Path(plan["folder"])
     token = plan_token(plan)
     archive = plan["original_destination"]
@@ -279,6 +315,8 @@ def preview(db, candidate, original, mode="keep"):
                          for pair in plan["pairs"]],
                "edition_evidence": plan["edition_evidence"],
                "audio_review": "Full decode and spectrum generated. Lossless provenance remains unknown."}
+    if strict:
+        return preview
     with closing(connect(db)) as connection, connection:
         connection.execute("DELETE FROM upgrade_plans WHERE candidate=? AND mode=? AND original_id=?",
                            (candidate, mode, original))
@@ -320,7 +358,7 @@ def move_exclusive(source, destination, *, identities, expected):
                 raise ValueError("An upgrade file changed during the move.")
             return expected
         error = ctypes.get_errno()
-        if error not in (errno.ENOTSUP, errno.ENOSYS):
+        if error not in (errno.ENOTSUP, errno.ENOSYS, errno.EXDEV):
             raise OSError(error, os.strerror(error), str(destination))
         # Some exFAT volumes lack exclusive rename. Use exclusive creation
         # and verify the copy before touching the source.
@@ -488,12 +526,12 @@ def ensure_upgrade_directory(path, base, identities, created):
             created.add(directory)
 
 
-def apply(db, candidate, original, token, mode="keep"):
-    plan = get_plan(db, candidate, original, mode)
+def apply(db, candidate, original, token, mode="keep", *, receipt=None, trusted_review=False, overrides=()):
+    plan = get_plan(db, candidate, original, mode, strict=trusted_review, overrides=overrides)
     with closing(connect(db)) as connection:
         issued = connection.execute("SELECT 1 FROM upgrade_plans WHERE token=? AND candidate=? AND mode=? AND original_id=?",
                                     (token, candidate, mode, original)).fetchone()
-    if not issued or token != plan_token(plan):
+    if (not issued and not trusted_review) or token != plan_token(plan):
         raise ValueError("The comparison changed. Review the destination again before confirming.")
     folder, root = Path(plan["folder"]), Path(plan["root"])
     work = folder / WORK_DIR
@@ -506,6 +544,8 @@ def apply(db, candidate, original, token, mode="keep"):
     journal_sig = None
     with closing(connect(db)) as connection:
         connection.execute("BEGIN IMMEDIATE")
+        if connection.execute("SELECT 1 FROM kept_albums WHERE candidate=?", (candidate,)).fetchone():
+            raise ValueError("This download already has a committed library action.")
         if mode == "replace" and replacement_destination(connection) != original_mode:
             raise ValueError("The replacement setting changed. Review the destinations again.")
         for pair in plan["pairs"]:
@@ -569,10 +609,23 @@ def apply(db, candidate, original, token, mode="keep"):
             result = {"destination": str(folder), "archive": plan["original_destination"],
                       "count": len(plan["pairs"]), "upgraded": len(plan["pairs"]),
                       "preserved": len(plan["preserved"]) + (len(plan["pairs"]) if mode == "keep" else 0),
-                      "skipped": plan["skipped"], "failed": 0,
+                      "skipped": plan["skipped"], "failed": int(original_mode == "trash"),
                       "trash_pending": str(archive) if original_mode == "trash" else None,
                       "staging_removed": 0, "staging_cleared": False, "staging_path": plan["staging"],
                       "work_cleanup_pending": True, "recovery_path": str(work)}
+            result.update(receipt or {})
+            if trusted_review and original_mode == "hidden":
+                recovery = {"root": str(root), "folder": str(folder), "directories": identities,
+                            "candidate": candidate, "transaction_id": result["transaction_id"], "files": []}
+                for (source, saved, saved_sig), (final, final_sig), pair in zip(moved, published, plan["pairs"]):
+                    recovery["files"].append({"original": str(source), "archive": str(saved),
+                                              "install": str(final), "id": pair["id"],
+                                              "original_signature": saved_sig, "installed_signature": final_sig,
+                                              "original_digest": pair["original_digest"],
+                                              "installed_digest": pair["download_digest"]})
+                connection.execute("INSERT INTO upgrade_recovery VALUES (?,?)",
+                                   (candidate, json.dumps(recovery)))
+                result["rollback_available"] = True
             connection.execute("INSERT INTO upgrade_results VALUES (?,?)", (candidate, json.dumps(result)))
             connection.commit()
         except BaseException:

@@ -15,7 +15,8 @@ from .catalog import connect, find_probe, probe, signature
 
 # Serialize decoding so opening an album cannot spawn many FFmpeg processes.
 _DECODE_LOCK = Lock()
-METHOD = "Full track · first audio stream · channels combined · Hann window · linear Hz · −120 to 0 dBFS"
+METHOD = "Full track · first audio stream · channels combined · Hann window · linear 0–22,050 Hz · −120 to 0 dBFS"
+
 
 
 def analyze_file(path, expected=None):
@@ -33,6 +34,30 @@ def analyze_file(path, expected=None):
     if signature(path.stat()) != fingerprint:
         raise ValueError("The audio changed during analysis.")
     return dict(result)
+
+
+def validate_decode(path, expected):
+    binary = shutil.which("ffmpeg")
+    if not binary:
+        raise ValueError("Install FFmpeg to verify downloaded audio.")
+    if Path(path).resolve(strict=True) != Path(path):
+        raise ValueError("Choose an audio file without symbolic links.")
+    with os.fdopen(os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), "rb") as source:
+        descriptor = source.fileno()
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode) or signature(before) != tuple(expected):
+            raise ValueError("The staged audio changed before integrity verification.")
+        try:
+            subprocess.run([
+                binary, "-hide_banner", "-v", "error", "-nostdin", "-xerror",
+                "-protocol_whitelist", "file", "-format_whitelist",
+                "mp3,flac,wav,aiff,mov,aac,ogg,ape,wv,asf,dsf,iff",
+                "-i", f"/dev/fd/{descriptor}", "-map", "0:a:0", "-f", "null", "-",
+            ], check=True, capture_output=True, pass_fds=(descriptor,), timeout=120)
+        except subprocess.SubprocessError as exc:
+            raise ValueError(f"Integrity verification failed for {Path(path).name}. Stage a fresh copy.") from exc
+        if signature(os.fstat(descriptor)) != tuple(expected) or signature(Path(path).stat()) != tuple(expected):
+            raise ValueError("The staged audio changed during integrity verification.")
 
 
 @lru_cache(maxsize=128)
@@ -55,7 +80,7 @@ def _render(path, fingerprint):
             "mp3,flac,wav,aiff,mov,aac,ogg,ape,wv,asf,dsf,iff",
             "-i", f"/dev/fd/{descriptor}", "-filter_complex",
             "[0:a:0]asplit[image][metrics];"
-            "[image]showspectrumpic=s=1000x480:legend=1:mode=combined:"
+            "[image]aresample=44100,showspectrumpic=s=1000x480:legend=1:mode=combined:"
             "color=intensity:scale=log:fscale=lin:win_func=hann:drange=120:limit=0[v];"
             "[metrics]aresample=44100,aformat=channel_layouts=mono,atrim=duration=300,"
             "asetnsamples=n=4096:p=0,aspectralstats=win_size=4096:overlap=0:measure=rolloff,"
@@ -131,7 +156,7 @@ def analyze_track(db, track_id=None):
         raise ValueError("Choose an available, indexed track.")
     result = analyze_file(Path(row["root"]) / row["path"],
                           tuple(row[key] for key in ("size", "mtime", "device", "inode")))
-    result.pop("measurements", None)
+    result["measurements"] = {key: value for key, value in result["measurements"].items() if key != "levels"}
     return result
 
 
@@ -146,7 +171,8 @@ def analyze_download(db, candidate_id=None, index=0, original_track_id=None):
     if not item.get("source"):
         raise ValueError("Wait for this track to finish downloading and pass inspection.")
     result = {"download": analyze_file(item["source"], item["fingerprint"])}
-    result["download"].pop("measurements", None)
+    result["download"]["measurements"] = {key: value for key, value in
+                                          result["download"]["measurements"].items() if key != "levels"}
     if item.get("original"):
         result["original"] = analyze_track(db, item["original"]["id"])
     return result

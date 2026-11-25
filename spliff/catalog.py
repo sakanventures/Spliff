@@ -38,6 +38,11 @@ CREATE TABLE IF NOT EXISTS transfer_preparations(
 CREATE TABLE IF NOT EXISTS upgrade_plans(
  token TEXT PRIMARY KEY, candidate TEXT NOT NULL, mode TEXT NOT NULL,
  original_id INTEGER NOT NULL, preview TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS upgrade_recovery(
+ candidate TEXT PRIMARY KEY, manifest TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS mcp_album_plans(
+ id TEXT PRIMARY KEY, candidate TEXT NOT NULL, original_id INTEGER, mode TEXT NOT NULL,
+ expires INTEGER NOT NULL, plan TEXT NOT NULL, review TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS upgrade_results(
  candidate TEXT PRIMARY KEY, result TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS edition_evidence(

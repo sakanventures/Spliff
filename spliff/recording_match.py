@@ -70,7 +70,7 @@ def compare_pcm(original, candidate):
         start = max(MAX_OFFSET, min(int(length * fraction), length - MAX_OFFSET - RATE))
         reference = original[start:start + RATE:4]
         offsets.append(max(range(-MAX_OFFSET, MAX_OFFSET + 1), key=lambda offset:
-                           correlation(reference, candidate[start + offset:start + offset + RATE:4])))
+                           abs(correlation(reference, candidate[start + offset:start + offset + RATE:4]))))
     offset = sorted(offsets)[len(offsets) // 2]
     start = max(0, -offset)
     end = min(len(original), len(candidate) - offset)
@@ -82,6 +82,9 @@ def compare_pcm(original, candidate):
         right = candidate[position + offset:stop + offset]
         if len(left) >= RATE // 4 and max(rms(left), rms(right)) > max(20, level * 0.03):
             scores.append(correlation(left, right))
+    inverted = sum(scores) < 0
+    if inverted:
+        scores = [-score for score in scores]
     scores.sort()
     mean = sum(scores) / len(scores) if scores else 0
     worst = scores[0] if scores else 0
@@ -92,7 +95,7 @@ def compare_pcm(original, candidate):
     return {
         "matched": (level >= 50 and len(scores) >= max(6, (end - start) // (2 * RATE))
                     and mean >= 0.94 and p05 >= 0.88 and worst >= 0.70 and edge_peak <= 0.025),
-        "offset_ms": offset, "compared_windows": len(scores), "mean_correlation": round(mean, 5),
+        "polarity_inverted": inverted, "offset_ms": offset, "compared_windows": len(scores), "mean_correlation": round(mean, 5),
         "p05_correlation": round(p05, 5), "minimum_correlation": round(worst, 5),
         "unmatched_edge_relative_rms": round(edge_peak, 5),
         "original_ms": len(original), "download_ms": len(candidate),
