@@ -95,7 +95,7 @@ class Plugin(BasePlugin):
         self.stopped.set()
         try:
             if self.downloads.allowed or self.downloads.recovery:
-                self.downloads.stop()
+                self.downloads.pause()
         except (OSError, ValueError):
             LOG.exception("Could not confirm Spliff transfer shutdown")
         finally:
@@ -113,13 +113,15 @@ class Plugin(BasePlugin):
     def request(self, request):
         operation = request.get("operation")
         if operation == "status":
-            return {"nicotine_version": __version__, "staging": enabled(staging_root())}
+            return self.on_main(self.status)
         if operation == "queue":
             return self.on_main(self.queue, request)
         if operation == "authorize_recovery":
             return self.on_main(self.downloads.recover, request.get("selections"))
         if operation == "stop_downloads":
             return self.on_main(self.downloads.stop)
+        if operation == "pause_downloads":
+            return self.on_main(self.downloads.pause)
         if operation == "download_status":
             return self.on_main(self.downloads.status, request.get("selection"))
         if operation != "search":
@@ -156,6 +158,13 @@ class Plugin(BasePlugin):
         except TimeoutError as exc:
             future.cancel()
             raise ValueError("Nicotine+ did not confirm the action. Check the staged download before retrying.") from exc
+
+    def status(self):
+        settings = self.config.sections["transfers"]
+        return {"nicotine_version": __version__, "staging": enabled(staging_root()),
+                "persistent_permission": True,
+                "soulseek_connected": self.core.users.login_status != UserStatus.OFFLINE,
+                "post_download_commands": bool(settings["afterfinish"] or settings["afterfolder"])}
 
     def queue(self, request):
         if self.stopped.is_set() or self.core.users.login_status == UserStatus.OFFLINE:

@@ -60,6 +60,11 @@ private struct SpliffSettings: View {
         path: "/api/file-metadata-preference", key: "mode", initial: "preserve")
 
     var body: some View {
+        ScrollView { settings }
+            .frame(width: 480)
+    }
+
+    private var settings: some View {
         VStack(alignment: .leading, spacing: 22) {
             HStack {
                 Text("Settings").font(.title2.bold())
@@ -67,6 +72,8 @@ private struct SpliffSettings: View {
                 Button("Done") { dismiss() }.keyboardShortcut(.cancelAction)
             }
             if model.dashboardReady {
+                TransferSettings(base: model.dashboardURL)
+                Divider()
                 VStack(alignment: .leading, spacing: 10) {
                     Text("After replacing an album").font(.headline)
                     Picker("Original files", selection: $preference.destination) {
@@ -110,7 +117,6 @@ private struct SpliffSettings: View {
             DisclosureGroup("ChatGPT connection") { ConnectionView().padding(.top, 12) }
         }
         .padding(24)
-        .frame(width: 480)
         .task(id: model.dashboardReady) {
             if model.dashboardReady {
                 async let replacement: Void = preference.load(base: model.dashboardURL)
@@ -118,6 +124,104 @@ private struct SpliffSettings: View {
                 _ = await (replacement, tagging)
             }
         }
+    }
+}
+
+private struct TransferSettings: View {
+    private struct Readiness: Decodable {
+        let permission: String
+        let code: String
+        let message: String
+        let bridgeConnected: Bool
+        let soulseekConnected: Bool?
+
+        var needsBridge: Bool { ["bridge_unavailable", "bridge_update_required"].contains(code) }
+    }
+
+    private struct Change: Decodable {
+        let message: String?
+        let error: String?
+    }
+
+    let base: URL
+    @State private var readiness: Readiness?
+    @State private var busy = false
+    @State private var readFailed = false
+    @State private var message = ""
+    @State private var generation = 0
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Downloads").font(.headline)
+            Toggle("Allow Spliff downloads", isOn: Binding(
+                get: { readiness?.permission == "on" },
+                set: { enabled in
+                    Task { await change("/api/transfer-permission?action=" + (enabled ? "enable" : "stop")) }
+                }
+            ))
+            .disabled(busy || readFailed || readiness == nil ||
+                      (readiness?.permission != "on" && readiness?.needsBridge == true))
+            Text("Review the Nicotine+ queue before turning this on. You still choose which downloads to stage.")
+                .foregroundStyle(.secondary)
+            if let status = readiness, !readFailed {
+                LabeledContent("Nicotine+ bridge", value: status.bridgeConnected ? "Connected" : "Unavailable")
+                if let connected = status.soulseekConnected {
+                    LabeledContent("Soulseek", value: connected ? "Connected" : "Offline")
+                }
+            }
+            Text(readFailed ? "Could not check download readiness. Spliff will try again." :
+                    readiness?.message ?? "Checking Nicotine+…")
+                .foregroundStyle(.secondary)
+            if readiness?.needsBridge == true {
+                Button("Install or update Spliff Search") { Task { await change("/api/install-nicotine-bridge") } }
+                    .disabled(busy)
+            }
+            if !message.isEmpty { Text(message) }
+        }
+        .task(id: base) {
+            while !Task.isCancelled {
+                await refresh()
+                try? await Task.sleep(for: .seconds(3))
+            }
+        }
+    }
+
+    private func refresh() async {
+        guard !busy, let url = URL(string: "/api/transfer-readiness", relativeTo: base) else { return }
+        generation += 1
+        let check = generation
+        do {
+            let (data, _) = try await URLSession.shared.data(from: url)
+            let decoder = JSONDecoder()
+            decoder.keyDecodingStrategy = .convertFromSnakeCase
+            let result = try decoder.decode(Readiness.self, from: data)
+            guard check == generation, !Task.isCancelled else { return }
+            readiness = result
+            readFailed = false
+        } catch {
+            if check == generation && !Task.isCancelled { readFailed = true }
+        }
+    }
+
+    private func change(_ path: String) async {
+        guard !busy, let url = URL(string: path, relativeTo: base) else { return }
+        generation += 1
+        busy = true
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.httpBody = Data()
+        request.setValue("dashboard", forHTTPHeaderField: "X-Spliff-Action")
+        request.setValue("http://127.0.0.1:\(base.port ?? 8765)", forHTTPHeaderField: "Origin")
+        do {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            let result = try JSONDecoder().decode(Change.self, from: data)
+            message = (response as? HTTPURLResponse)?.statusCode == 200 ?
+                result.message ?? "Download permission saved." : result.error ?? "Could not save download permission."
+        } catch {
+            message = "Could not reach the Spliff dashboard. Try again."
+        }
+        busy = false
+        await refresh()
     }
 }
 

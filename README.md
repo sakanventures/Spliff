@@ -47,14 +47,7 @@ The initial release targets macOS. The vertical slice has been exercised with ge
 
 ## Search Soulseek from chat
 
-Spliff Search uses an installed, connected copy of Nicotine+ 3.3.11. Install the bridge once, then enable **Spliff Search** in Nicotine+ preferences under **Plugins**. Keep Nicotine+ running and signed in while searching.
-
-```sh
-spliff install-nicotine-plugin
-spliff nicotine-status
-```
-
-If Nicotine+ uses a custom plugin folder, pass its path with `--plugins-dir`. The installer leaves an existing bridge installation intact.
+Spliff Search uses Nicotine+ 3.3.11. In **Spliff → Settings → Downloads**, choose **Install or update Spliff Search**, then quit and reopen Nicotine+. Enable **Spliff Search** under **Plugins** in Nicotine+ settings. Keep Nicotine+ running and signed in while searching.
 
 The `search_nicotine` MCP tool accepts a search query, a track or album mode, and an optional result limit. It returns peer-advertised lossless candidates from an eight-second search. Album results describe matching files seen in that window. They do not confirm a complete album or its edition.
 
@@ -78,7 +71,7 @@ Open a completed download and choose **Choose upgrade** to see the available pla
 
 Spliff verifies and indexes the installed lossless files before archiving originals. It skips unresolved, protected or conflicting tracks and reports the counts. Mac Trash receives individual reviewed originals. If a move to Trash fails, Spliff reports the folder holding the remaining originals. Before installing anything, Spliff records each original, recovery and installation path in `.spliff-keep-both/plan.json` inside the album. After an interruption, use that plan to locate the files before retrying. Cleanup removes verified Spliff files and empty Spliff-created folders, leaving unexpected files for inspection.
 
-Use **Advanced** to search manually, inspect editions, compare individual files or open spectrograms. Nicotine+ post-download commands must be turned off, and its staging and incomplete folders must be outside indexed music folders. For older bridge installations, run `spliff install-nicotine-plugin --upgrade` and reload Spliff Search in Nicotine+.
+Use **Advanced** to search manually, inspect editions, compare individual files or open spectrograms. Nicotine+ post-download commands must be turned off, and its staging and incomplete folders must be outside indexed music folders. For older bridge installations, choose **Install or update Spliff Search** in Spliff Settings, then quit and reopen Nicotine+.
 
 ## Keep both versions
 
@@ -155,6 +148,6 @@ Changing local MCP code does not update an already registered ChatGPT tool schem
 
 With downloads enabled, `sync_music_folder` schedules searches for the selected local folder. Review matching offers and explicitly select each download. `music_sync_status` shows progress. `list_nicotine_transfers` exposes the same transfer inventory as Downloads, including work queued through the GUI. `list_staged_reviews` covers manual file comparisons only.
 
-The upgraded Nicotine+ bridge starts with Spliff staging disabled. After reviewing Nicotine+'s saved queue, run `spliff nicotine-downloads enable` locally to permit explicitly selected candidates. Use `spliff nicotine-downloads stop` to disable staging and pause unfinished transfers matched to Spliff manifests. If the command cannot confirm pauses, disconnect Nicotine+ and check the queue. Spliff leaves unrelated transfers alone. Intent and submission records are written to the private `transfer-audit.jsonl` in Spliff's staging directory.
+Open **Spliff → Settings → Downloads** to check download readiness. ChatGPT can read the same diagnostics with `spliff_transfer_readiness` and link back to local Settings. Review the queue in Nicotine+, then turn on **Allow Spliff downloads**. Spliff saves this preference across restarts. Each candidate still needs your explicit approval. Turning the setting off blocks new staging and pauses unfinished transfers matched to Spliff manifests. If Spliff cannot confirm the pauses, disconnect Nicotine+ and check its queue. Spliff leaves unrelated transfers alone. Intent and submission records are written to the private `transfer-audit.jsonl` in Spliff's staging directory.
 
 Call `review_nicotine_download` to get both reviewed plans with exact paths, preserved and skipped originals, and the local approval link. Present the plans and link so the user can choose on their Mac. Check `nicotine_transfer_status` for the result. When the dashboard runs on a custom port, start MCP with the same `--dashboard-port` value.

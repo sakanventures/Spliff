@@ -156,6 +156,15 @@
         <h2 id="settings-heading">Settings</h2>
         <button id="close-settings" type="button">Close</button>
       </div>
+      <fieldset>
+        <legend>Downloads</legend>
+        <label><input id="allow-transfers" type="checkbox" disabled> Allow Spliff downloads</label>
+        <p class="muted">Review the Nicotine+ queue before turning this on. You still choose which downloads to stage.</p>
+        <p id="transfer-connection" class="muted" hidden></p>
+        <p id="transfer-readiness" role="status">Checking Nicotine+…</p>
+        <p id="transfer-setting-result" role="status"></p>
+        <button id="install-nicotine-bridge" type="button" hidden>Install or update Spliff Search</button>
+      </fieldset>
       <form id="replacement-settings">
         <label>When I choose Replace
           <select id="replace-destination" disabled>

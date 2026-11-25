@@ -686,8 +686,61 @@ const metadataSelect = get('file-metadata');
 const saveSettings = settingsForm.querySelector('button');
 const settingsStatus = get('settings-status');
 
+const transferToggle = get('allow-transfers');
+const transferReadiness = get('transfer-readiness');
+const transferConnection = get('transfer-connection');
+const transferResult = get('transfer-setting-result');
+const installBridge = get('install-nicotine-bridge');
+let transferBusy = false;
+let transferRequest = 0;
+
+async function refreshTransferSettings() {
+  if (!settingsDialog.open || transferBusy) return;
+  const request = ++transferRequest;
+  try {
+    const status = await api('/api/transfer-readiness');
+    if (request !== transferRequest || !settingsDialog.open) return;
+    transferToggle.checked = status.permission === 'on';
+    transferToggle.disabled = status.permission !== 'on' &&
+      ['bridge_unavailable', 'bridge_update_required'].includes(status.code);
+    installBridge.hidden = !['bridge_unavailable', 'bridge_update_required'].includes(status.code);
+    const bridgeState = status.bridge_connected ? 'Nicotine+ bridge connected' : 'Nicotine+ bridge unavailable';
+    const soulseekState = status.soulseek_connected === null ? '' :
+      (status.soulseek_connected ? 'Soulseek connected' : 'Soulseek offline');
+    transferConnection.textContent = [bridgeState, soulseekState].filter(Boolean).join(' · ');
+    transferConnection.hidden = false;
+    transferReadiness.textContent = status.message;
+  } catch (error) {
+    if (request !== transferRequest) return;
+    transferToggle.disabled = true;
+    transferConnection.hidden = true;
+    transferReadiness.textContent = 'Could not check download readiness. Spliff will try again.';
+  }
+}
+
+async function changeTransferSettings(url) {
+  ++transferRequest;
+  transferBusy = true;
+  transferToggle.disabled = installBridge.disabled = true;
+  try {
+    const result = await action(url);
+    transferResult.textContent = result.message || (result.enabled ? 'Download permission saved.' : 'Downloads turned off.');
+  } catch (error) {
+    transferResult.textContent = error.message;
+  } finally {
+    transferBusy = installBridge.disabled = false;
+    await refreshTransferSettings();
+  }
+}
+
+transferToggle.addEventListener('change', () => changeTransferSettings(
+  '/api/transfer-permission?action=' + (transferToggle.checked ? 'enable' : 'stop')));
+installBridge.addEventListener('click', () => changeTransferSettings('/api/install-nicotine-bridge'));
+setInterval(refreshTransferSettings, 3000);
+
 get('open-settings').addEventListener('click', async () => {
   settingsDialog.showModal();
+  refreshTransferSettings();
   get('advanced').open = false;
   replacementSelect.disabled = metadataSelect.disabled = saveSettings.disabled = true;
   settingsStatus.textContent = 'Loading settings…';
@@ -1192,3 +1245,5 @@ function showImportPreview(plan) {
 }
 
 if (reviewLink.has('import_candidate')) showImport(reviewLink.get('import_candidate'));
+
+if (!filePreview && new URLSearchParams(location.search).get('settings') === '1') get('open-settings').click();

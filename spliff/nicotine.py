@@ -1,11 +1,13 @@
 """Spliff's client and candidate ranking for the local Nicotine+ bridge."""
+import fcntl
+import os
 import shutil
 import socket
 from collections import defaultdict
 from pathlib import Path, PureWindowsPath
 from tempfile import TemporaryDirectory
 
-from .nicotine_bridge.downloads import ENABLE_FILE, audit, enabled, private_folder
+from .nicotine_bridge.downloads import DISABLED_MESSAGE, ENABLE_FILE, audit, permission_state, private_folder
 from .nicotine_bridge.wire import (
     album_key, album_tracks, track_stem,
     REQUEST_BYTES, RESPONSE_BYTES, VERSION, WINDOW_SECONDS, encode, endpoint, read, search_term, staging_root,
@@ -40,6 +42,17 @@ def install_plugin(plugins, upgrade=False):
     return target
 
 
+class TransferError(ValueError):
+    def __init__(self, code, message):
+        super().__init__(message)
+        self.code = code
+
+
+BRIDGE_UNAVAILABLE = "Open Nicotine+ and enable the Spliff Search plugin in Settings → Plugins."
+BRIDGE_UPDATE = "In Spliff Settings, choose Install or update Spliff Search, then quit and reopen Nicotine+."
+SOULSEEK_OFFLINE = "Connect Nicotine+ to Soulseek, then check Spliff Settings again."
+
+
 def request(operation, **arguments):
     payload = encode({"version": VERSION, "operation": operation, **arguments}, REQUEST_BYTES)
     path = endpoint()
@@ -54,17 +67,22 @@ def request(operation, **arguments):
             with connection.makefile("rb") as stream:
                 response = read(stream, RESPONSE_BYTES)
     except (FileNotFoundError, ConnectionRefusedError) as exc:
-        raise ValueError("Open Nicotine+ and enable the Spliff Search plugin in its preferences.") from exc
+        raise TransferError("bridge_unavailable", BRIDGE_UNAVAILABLE) from exc
     except (OSError, ValueError) as exc:
         if operation == "queue" and dispatched:
             raise ValueError("Nicotine+ did not confirm the action. Check the staged download before retrying.") from exc
         if isinstance(exc, ValueError):
             raise
-        raise ValueError("Spliff could not reach Nicotine+. Try again shortly.") from exc
+        raise TransferError("bridge_unavailable", BRIDGE_UNAVAILABLE) from exc
     if response.get("version") != VERSION:
-        raise ValueError("The Spliff app and Nicotine+ plugin use different bridge versions.")
+        raise TransferError("bridge_update_required", BRIDGE_UPDATE)
     if "error" in response:
-        raise ValueError(response["error"])
+        message = response["error"]
+        if message == DISABLED_MESSAGE or message.startswith("Spliff transfers are disabled."):
+            raise TransferError("permission_off", DISABLED_MESSAGE)
+        if message.startswith("Connect Nicotine+ to Soulseek"):
+            raise TransferError("soulseek_offline", SOULSEEK_OFFLINE)
+        raise ValueError(message)
     return response
 
 
@@ -127,23 +145,68 @@ def search(_db, query=None, kind="track", limit=3):
     }
 
 
+def transfer_readiness():
+    result = {"permission": "unknown", "bridge_connected": False, "soulseek_connected": None,
+              "ready": False}
+    try:
+        result["permission"] = permission_state(staging_root())
+    except OSError:
+        result["permission"] = "invalid"
+
+    try:
+        bridge = request("status")
+    except (ValueError, OSError) as exc:
+        return {**result, "code": getattr(exc, "code", "bridge_unavailable"),
+                "message": str(exc) if isinstance(exc, TransferError) else BRIDGE_UNAVAILABLE}
+
+    result.update(bridge_connected=True, soulseek_connected=bridge.get("soulseek_connected"),
+                  nicotine_version=bridge.get("nicotine_version"))
+    if not bridge.get("persistent_permission"):
+        code, message = "bridge_update_required", BRIDGE_UPDATE
+    elif result["permission"] == "invalid" or (result["permission"] == "on") != bridge.get("staging"):
+        code, message = ("permission_unavailable", "Spliff could not verify the saved download permission. "
+                         "Refresh Settings, then contact Spliff support if this continues.")
+    elif not result["soulseek_connected"]:
+        code, message = "soulseek_offline", SOULSEEK_OFFLINE
+    elif bridge.get("post_download_commands"):
+        code, message = ("post_download_commands", "In Nicotine+ settings, turn off commands that run "
+                         "after downloads finish, then check Spliff Settings again.")
+    elif result["permission"] != "on":
+        code, message = "permission_off", DISABLED_MESSAGE
+    else:
+        code, message = "ready", "Ready to stage downloads you approve."
+        result["ready"] = True
+    return {**result, "code": code, "message": message}
+
+
 def transfer_control(action):
+    if action not in {"enable", "stop"}:
+        raise ValueError("Choose whether to allow Spliff downloads.")
     root = staging_root()
     private_folder(root)
     flag = root / ENABLE_FILE
-    if action == "enable":
-        audit(root, "local_enable")
-        try:
-            flag.touch(mode=0o600, exist_ok=False)
-        except FileExistsError:
-            if not enabled(root):
-                raise ValueError("The Spliff transfer enable file is invalid.")
-        return {"enabled": True}
-    flag.unlink(missing_ok=True)
+    # Serialize dashboard and CLI changes across processes. Lock the private
+    # directory itself so locking never follows a user-replaceable marker.
+    fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
-        return request("stop_downloads")
-    except (ValueError, OSError) as exc:
-        audit(root, "stop_unconfirmed", error=str(exc))
-        return {"enabled": False, "paused": None,
-                "message": "New staging is disabled. Existing transfer pauses were not confirmed. "
-                           "Disconnect Nicotine+ before inspecting its queue."}
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        if action == "enable":
+            if not request("status").get("persistent_permission"):
+                raise TransferError("bridge_update_required", BRIDGE_UPDATE)
+            audit(root, "local_enable")
+            try:
+                flag.touch(mode=0o600, exist_ok=False)
+            except FileExistsError:
+                if permission_state(root) != "on":
+                    raise ValueError("Spliff could not verify the saved download permission. Contact Spliff support.")
+            return {"enabled": True}
+        flag.unlink(missing_ok=True)
+        try:
+            bridge = request("status")
+            return request("pause_downloads" if bridge.get("persistent_permission") else "stop_downloads")
+        except (ValueError, OSError) as exc:
+            audit(root, "stop_unconfirmed", error=str(exc))
+            return {"enabled": False, "paused": None,
+                    "message": "New staging is off. Disconnect Nicotine+ and check its queue for active transfers."}
+    finally:
+        os.close(fd)

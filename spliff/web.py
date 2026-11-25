@@ -14,7 +14,7 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 from .catalog import albums, connect, file_metadata_preference, replacement_preference, stats, tracks
 from . import keep_both, library_import, sync
-from .nicotine import search
+from .nicotine import install_plugin, search, transfer_control, transfer_readiness
 from .review import protect, reviews, stage
 from .spectral import analyze_track, analyze_download
 from .artist import library as artist_library, upgrades as artist_upgrades
@@ -96,6 +96,8 @@ def serve(db, port):
                                            after=int(params.get("after", 0))))
                 elif url.path == "/api/summary":
                     self.reply_json(stats(db))
+                elif url.path == "/api/transfer-readiness":
+                    self.reply_json(transfer_readiness())
                 elif url.path == "/api/replacement-preference":
                     self.reply_json(replacement_preference(db))
                 elif url.path == "/api/file-metadata-preference":
@@ -155,6 +157,24 @@ def serve(db, port):
                 return
             try:
                 parts = urlsplit(self.path).path.strip("/").split("/")
+                if parts == ["api", "transfer-permission"]:
+                    self.body_length(0)
+                    params = parse_qs(urlsplit(self.path).query, max_num_fields=1)
+                    action = params.get("action", [None])[0]
+                    try:
+                        result = transfer_control(action)
+                    except OSError:
+                        raise ValueError("Spliff could not save download permission. Try again or contact Spliff support.")
+                    self.reply_json(result)
+                    return
+                if parts == ["api", "install-nicotine-bridge"]:
+                    self.body_length(0)
+                    try:
+                        install_plugin(Path.home() / ".local/share/nicotine/plugins", upgrade=True)
+                    except OSError:
+                        raise ValueError("Spliff could not install Spliff Search. Try again or contact Spliff support.")
+                    self.reply_json({"message": "Quit and reopen Nicotine+, then enable Spliff Search in Settings → Plugins."})
+                    return
                 if parts == ["api", "upgrade-options"]:
                     self.body_length(0)
                     params = parse_qs(urlsplit(self.path).query, max_num_fields=3)

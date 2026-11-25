@@ -17,14 +17,28 @@ INACTIVE = {"Finished", "Paused", "Filtered"}
 ENABLE_FILE = "transfers-enabled"
 
 
-def enabled(root):
+DISABLED_MESSAGE = ("Spliff transfers are disabled. On the Mac running Spliff, open Settings, review the "
+                    "Nicotine+ queue, then turn on Allow Spliff downloads.")
+
+
+def permission_state(root):
+    """Read the marker without following links or creating state."""
     flag = root / ENABLE_FILE
     try:
+        folder = root.lstat()
+        if (root.resolve() != root or not stat.S_ISDIR(folder.st_mode)
+                or folder.st_uid != os.getuid() or folder.st_mode & 0o077):
+            return "invalid"
         info = flag.lstat()
     except FileNotFoundError:
-        return False
-    return (stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid()
-            and not info.st_mode & 0o077)
+        return "off"
+    if stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid() and not info.st_mode & 0o077:
+        return "on"
+    return "invalid"
+
+
+def enabled(root):
+    return permission_state(root) == "on"
 
 
 def audit(root, event, **details):
@@ -163,6 +177,12 @@ class Downloads:
         root = staging_root()
         private_folder(root)
         (root / ENABLE_FILE).unlink(missing_ok=True)
+        return self.pause()
+
+    def pause(self):
+        """Clear session authorization and pause jobs while preserving the saved preference."""
+        root = staging_root()
+        private_folder(root)
         self.allowed.clear()
         self.recovery.clear()
         transfers = self.core.downloads.transfers
@@ -186,8 +206,8 @@ class Downloads:
                 continue
         if matches:
             self.core.downloads.abort_downloads(matches)
-        audit(root, "emergency_stop", paused=len(matches))
-        return {"enabled": False, "paused": len(matches)}
+        audit(root, "transfers_paused", paused=len(matches))
+        return {"enabled": enabled(root), "paused": len(matches)}
 
     def queue(self, selection, searches, roots, approved=None, source=None, original_id=None):
         kind, search_id, index = selection_parts(selection)
@@ -206,7 +226,7 @@ class Downloads:
         if manifest.is_file():
             return self.status(selection)
         if not enabled(root):
-            raise ValueError("Spliff transfers are disabled. Enable them locally after reviewing the Nicotine+ queue.")
+            raise ValueError(DISABLED_MESSAGE)
         if source not in {"mcp", "dashboard", "manual"} or (
                 original_id is not None and (type(original_id) is not int or original_id < 1)):
             raise ValueError("Staging requires an explicit candidate selection.")

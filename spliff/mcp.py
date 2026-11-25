@@ -8,6 +8,7 @@ from .catalog import replacement_preference, stats, tracks
 from .discogs import release_details, search_releases
 from .discogs_auth import connect_discogs
 from .review import reviews
+from .nicotine import TransferError, transfer_readiness
 from .nicotine import search as search_nicotine
 from .staged_downloads import applied_transfer, list_downloads, queue, review_download, transfer_status as read_transfer_status
 from .spectral import analyze_track, analyze_download
@@ -107,6 +108,8 @@ TOOLS = [
      {}, lambda db: {"items": reviews(db)}),
 ]
 DOWNLOAD_TOOLS = [
+    ("spliff_transfer_readiness", "Check saved download permission, the Nicotine+ bridge and Soulseek connection. "
+     "Read-only. Use before troubleshooting a failed staging request.", {}, transfer_readiness),
     ("sync_music_folder", "Start a folder sync only for a local folder supplied or selected by the user. "
      "Indexes lossy tracks and searches Soulseek in Spliff’s local dashboard service. "
      "Each download requires an explicit candidate selection.",
@@ -200,6 +203,8 @@ def serve(db, search_only=False, allow_downloads=False, allow_discogs=False, das
         instructions = ("For a selected folder use sync_music_folder and music_sync_status. "
                         "For new music, search with explicit kind=album or kind=track and stage without an original ID. "
                         "Ask the user to select each candidate before calling stage_nicotine_download. "
+                        "Use spliff_transfer_readiness when staging is blocked and give the user its local Settings link. "
+                        "Only the user can change transfer permission in Settings. "
                         "Discover existing transfers with list_nicotine_transfers. Handle candidate IDs internally. "
                         "Present the reviewed options and destinations from review_nicotine_download and give "
                         "the user its local approval link. For a new download use its Add to library link. "
@@ -258,7 +263,9 @@ def serve(db, search_only=False, allow_downloads=False, allow_discogs=False, das
                 respond(request_id, error=(-32602, "Unknown tool or invalid arguments"))
                 continue
             try:
-                if tool[3] is review_for_chat:
+                if tool[3] is transfer_readiness:
+                    payload = {**tool[3](), "settings_url": f"http://127.0.0.1:{dashboard_port}/?settings=1"}
+                elif tool[3] is review_for_chat:
                     payload = review_for_chat(db, dashboard_port=dashboard_port, **arguments)
                 else:
                     payload = tool[3](db, **arguments)
@@ -272,6 +279,10 @@ def serve(db, search_only=False, allow_downloads=False, allow_discogs=False, das
                     result = {"content": content}
                 else:
                     result = {"content": [{"type": "text", "text": json.dumps(payload)}]}
+            except TransferError as exc:
+                payload = {"code": exc.code, "message": str(exc),
+                           "settings_url": f"http://127.0.0.1:{dashboard_port}/?settings=1"}
+                result = {"isError": True, "content": [{"type": "text", "text": json.dumps(payload)}]}
             except (ValueError, OSError, sqlite3.Error) as exc:
                 message = str(exc) if isinstance(exc, ValueError) else "Catalog unavailable"
                 result = {"isError": True, "content": [{"type": "text", "text": message}]}

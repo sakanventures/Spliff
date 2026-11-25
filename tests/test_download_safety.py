@@ -1,10 +1,13 @@
 import json
+import runpy
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+from threading import Event
 from time import time
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from spliff.nicotine_bridge.downloads import Downloads, ENABLE_FILE, private_folder
 from spliff.nicotine_bridge.wire import fingerprint
@@ -108,6 +111,39 @@ class DownloadSafety(unittest.TestCase):
         self.assertFalse(self.bridge.permit_transfer(staged, 1024))
         with self.assertRaisesRegex(ValueError, "disabled"):
             self.submit("b" * 32, files, files)
+
+    def test_bridge_shutdown_pauses_without_revoking_saved_permission(self):
+        files = self.offer("one", "Release One", 1)
+        self.submit("a" * 32, files, files)
+        transfer, = self.transfers.values()
+        transfer_count = len(self.calls)
+        upstream = {
+            "pynicotine": SimpleNamespace(__version__="3.3.11"),
+            "pynicotine.events": SimpleNamespace(events=Mock()),
+            "pynicotine.pluginsystem": SimpleNamespace(BasePlugin=object),
+            "pynicotine.slskmessages": SimpleNamespace(FileAttribute=None, TransferResponse=None, UserStatus=None),
+        }
+        with patch.dict(sys.modules, upstream):
+            plugin_type = runpy.run_module("spliff.nicotine_bridge.plugin")["Plugin"]
+        plugin = plugin_type()
+        plugin.downloads = self.bridge
+        plugin.bridge, plugin.lock, plugin.path = Mock(), Mock(), Mock()
+        plugin.restore_transfer_guard = Mock()
+        plugin.stopped, plugin.active = Event(), None
+
+        plugin.disable()
+
+        self.assertTrue((self.root / ENABLE_FILE).is_file())
+        self.assertEqual(transfer.status, "Paused")
+        self.assertFalse(self.bridge.permit_transfer(transfer, transfer.size))
+
+        restarted = Downloads(self.bridge.core, self.bridge.config)
+        self.assertFalse(restarted.permit_transfer(transfer, transfer.size))
+        self.assertEqual(len(self.calls), transfer_count)
+        files = self.offer("two", "Release Two", 1)
+        self.bridge = restarted
+        self.submit("b" * 32, files, files)
+        self.assertEqual(len(self.calls), transfer_count + 1)
 
     def test_recovery_authorizes_exact_paused_files_without_queueing(self):
         first = self.offer("one", "Release One", 18)

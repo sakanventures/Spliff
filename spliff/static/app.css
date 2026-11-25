@@ -180,6 +180,10 @@ dialog { width: min(90vw, 490px); border: 1px solid var(--edge); border-radius: 
 dialog::backdrop { background: #2c261e66; }
 .dialog-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .dialog-heading h2 { margin: 0; font-size: 1.15rem; }
+#settings-dialog fieldset { border: 1px solid var(--edge); border-radius: 8px; margin: 16px 0; }
+#settings-dialog fieldset label { display: inline-flex; align-items: center; gap: 8px; }
+#allow-transfers { width: auto; accent-color: var(--accent); }
+#transfer-setting-result:empty { display: none; }
 #replacement-settings { display: grid; gap: 16px; padding: 20px 0 0; }
 #replacement-settings button { justify-self: start; }
 #settings-status:empty { display: none; }
