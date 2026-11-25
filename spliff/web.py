@@ -348,8 +348,10 @@ def serve(db, port):
                     return
                 if parts == ["api", "album-search"]:
                     self.body_length(0)
-                    query = parse_qs(urlsplit(self.path).query, max_num_fields=1).get("q", [""])[0]
-                    self.reply_json(search(db, query, kind="album", limit=None))
+                    params = parse_qs(urlsplit(self.path).query, max_num_fields=2)
+                    query = params.get("q", [""])[0]
+                    self.reply_json(search(db, query, kind="album", limit=None,
+                                           mp3_only=params.get("format") == ["mp3"]))
                     return
                 if parts == ["api", "artist-upgrades"]:
                     self.body_length(0)

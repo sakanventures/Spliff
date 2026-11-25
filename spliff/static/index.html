@@ -58,6 +58,21 @@
 
     </section>
     <section id="albums-panel" aria-label="Albums" hidden>
+      <form id="soulseek-form" class="album-filter">
+        <label><span class="visually-hidden">Music to find</span><input id="soulseek-query" type="search"
+          placeholder="Enter artist and album" maxlength="180" minlength="2" required></label>
+        <div class="music-search-controls">
+          <label><span class="visually-hidden">File format</span><select id="music-format">
+            <option value="flac">FLAC</option><option value="wav">WAV</option><option value="mp3">MP3</option>
+          </select></label>
+          <label><span class="visually-hidden">Minimum estimated bitrate</span><select id="music-bitrate">
+            <option value="0">Any bitrate</option><option value="192">192+ kbps</option>
+            <option value="256">256+ kbps</option><option value="320">320+ kbps</option>
+            <option value="700">700+ kbps</option><option value="1400">1400+ kbps</option>
+          </select></label>
+          <button id="search-soulseek" type="submit">Search Soulseek</button>
+        </div>
+      </form>
       <div id="album-library">
         <div class="hero">
           <div class="recommended-heading">
@@ -96,10 +111,7 @@
         </div>
         <p id="soulseek-status" role="status"></p>
         <ul id="soulseek-results" class="album-list"></ul>
-        <form id="soulseek-form" class="album-filter">
-          <label>Nicotine+ search<input id="soulseek-query" type="search" maxlength="180" minlength="2" required></label>
-          <button id="search-soulseek" type="submit">Find FLACs</button>
-        </form>
+
       </div>
     </section>
     <section id="index" aria-label="Track index" hidden>

@@ -102,11 +102,15 @@ def album_folders(files, search_id=None):
         selected = album_tracks(entries, entries[0])
         names = {PureWindowsPath(file["path"]).name for file in entries}
         stems = {track_stem(file) for file in entries}
+        rates = [round(file["bytes"] * 8 / (file["seconds"] * 1000))
+                 for file in selected if file.get("seconds") and file["seconds"] > 0]
         candidates.append({
             "peer": peer, "folder": folder, "matching_files": len(stems),
             **({"candidate_id": f"album-{search_id}-{index}"} if search_id else {}),
             "formats": sorted({file["format"] for file in entries}),
             "lossless_files": len(selected),
+            "selected_formats": sorted({file["format"] for file in selected}),
+            "minimum_kbps": min(rates) if len(rates) == len(selected) and rates else None,
             "flac_files": sum(file["format"] == "flac" for file in selected),
             "total_bytes": sum(file.get("bytes") or 0 for file in selected),
             "quality": [dict(sample_rate=rate, bit_depth=depth) for rate, depth in sorted(
@@ -117,24 +121,29 @@ def album_folders(files, search_id=None):
     return sorted(candidates, key=lambda item: (-item["total_bytes"], *availability(item)))
 
 
-def search(_db, query=None, kind="track", limit=3):
+def search(_db, query=None, kind="track", limit=3, *, mp3_only=False):
     query = search_term(query)
     if kind not in ("track", "album"):
         raise ValueError("Choose a track or album search.")
     if limit is not None and (type(limit) is not int or not 1 <= limit <= 10):
         raise ValueError("Choose between 1 and 10 candidates.")
-    response = request("search", query=query)
+    response = request("search", query=query, **({"mp3_only": True} if mp3_only else {}))
     files = response["files"]
+    if mp3_only:
+        if response.get("mp3_only") is not True:
+            raise TransferError("bridge_update_required", BRIDGE_UPDATE)
+        files = [file for file in files if file["format"] == "mp3"]
     search_id = response.get("search_id")
     if kind == "album":
-        candidates = album_folders(files, search_id)
+        candidates = album_folders(files, None if mp3_only else search_id)
     else:
         candidates = sorted(
             (dict(file, candidate_id=f"track-{search_id}-{index}") if search_id else file
              for index, file in enumerate(files)), key=availability,
         )
     from .candidates import record
-    record(_db, query, kind, candidates[:limit], files)
+    if not mp3_only:
+        record(_db, query, kind, candidates[:limit], files)
     return {
         "query": query, "kind": kind, "candidates": candidates[:limit],
         "observed_matches": len(candidates), "search_window_seconds": WINDOW_SECONDS,

@@ -8,11 +8,11 @@ struct SpliffApp: App {
     var body: some Scene {
         Window("Spliff", id: "main") {
             ContentView().environmentObject(companion)
-                .frame(minWidth: 760, minHeight: 540)
+                .frame(minWidth: 420, minHeight: 540)
                 .task { await companion.refresh() }
         }
         .windowStyle(.hiddenTitleBar)
-        .defaultSize(width: 1100, height: 760)
+        .defaultSize(width: 540, height: 760)
         MenuBarExtra("Spliff", systemImage: "waveform") {
             CompanionMenu().environmentObject(companion)
         }

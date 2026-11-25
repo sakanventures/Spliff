@@ -25,8 +25,9 @@ MAX_FILES = 240
 
 
 class Search:
-    def __init__(self, query):
+    def __init__(self, query, mp3_only=False):
         self.query = query
+        self.mp3_only = mp3_only
         self.id = uuid4().hex
         self.token = None
         self.files = {}
@@ -126,7 +127,7 @@ class Plugin(BasePlugin):
             return self.on_main(self.downloads.status, request.get("selection"))
         if operation != "search":
             raise ValueError("Unknown Spliff bridge operation.")
-        search = Search(search_term(request.get("query")))
+        search = Search(search_term(request.get("query")), request.get("mp3_only") is True)
         events.invoke_main_thread(self.start, search)
         if not search.done.wait(WINDOW_SECONDS + 4):
             search.done.set()
@@ -135,7 +136,7 @@ class Plugin(BasePlugin):
         if search.error:
             return {"error": search.error}
         return {"files": list(search.files.values()), "truncated": search.truncated,
-                "search_id": search.id}
+                "search_id": search.id, "mp3_only": search.mp3_only}
 
     @staticmethod
     def on_main(operation, *arguments):
@@ -261,7 +262,7 @@ class Plugin(BasePlugin):
                     or any(word in lower for word in active.excluded_words)):
                 continue
             extension = PureWindowsPath(path).suffix.lower().lstrip(".")
-            if extension not in FORMATS:
+            if extension not in ({"mp3"} if search.mp3_only else FORMATS):
                 continue
             key = (message.username, path)
             if key in search.files:

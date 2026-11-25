@@ -11,6 +11,10 @@ const element = (tag, content, className) => {
 async function api(url, options) {
   if (filePreview) throw new Error('Open the local dashboard to connect to your library.');
   const response = await fetch(url, options);
+  if (!response.headers.get('Content-Type')?.includes('application/json')) {
+    if (response.status === 404) throw new Error('Restart services from the Spliff menu to load this feature.');
+    throw new Error('Spliff received an unexpected response from its local service.');
+  }
   const data = await response.json();
   if (!response.ok) throw new Error(data.error || 'Catalog unavailable');
   return data;
@@ -268,9 +272,10 @@ async function queueAlbum(candidate, album) {
   buttons.forEach(button => { button.disabled = true; });
   status.textContent = 'Sending to Nicotine+…';
   try {
-    const params = new URLSearchParams({candidate: candidate.candidate_id, original: album.id});
+    const params = new URLSearchParams({candidate: candidate.candidate_id});
+    if (album) params.set('original', album.id);
     await action('/api/downloads?' + params);
-    notice('Sent to Nicotine+. The album will appear in Downloads when all files are ready.');
+    notice('Sent to Nicotine+. Track its progress in Activity.');
     downloadOriginal = null;
     if (currentAlbum === album && document.body.dataset.view === 'albums') view('downloads');
     status.textContent = 'Sent to Nicotine+.';
@@ -412,6 +417,15 @@ get('soulseek-form').addEventListener('submit', async event => {
   event.preventDefault();
   const request = ++sourceRequest;
   const album = currentAlbum;
+  const query = get('soulseek-query').value;
+  const format = get('music-format').value;
+  const bitrate = Number(get('music-bitrate').value);
+  get('album-library').hidden = true;
+  get('album-search').hidden = false;
+  if (!album) {
+    get('selected-album-title').textContent = query;
+    get('selected-album-info').textContent = '';
+  }
   const status = get('soulseek-status');
   const list = get('soulseek-results');
   const searchButton = get('search-soulseek');
@@ -419,12 +433,17 @@ get('soulseek-form').addEventListener('submit', async event => {
   list.replaceChildren();
   status.textContent = 'Searching Nicotine+…';
   try {
-    const {candidates} = await action('/api/album-search?' + new URLSearchParams({q: get('soulseek-query').value}));
+    const {candidates} = await action('/api/album-search?' + new URLSearchParams({q: query, format}));
     if (request !== sourceRequest) return;
-    const options = candidates.filter(candidate => candidate.candidate_id && candidate.flac_files === candidate.matching_files);
-    options.sort((first, second) => (second.total_bytes || 0) - (first.total_bytes || 0));
-    status.textContent = options.length ? 'Choose a FLAC download. Spliff checks it against your album after it finishes.' :
-      'No FLAC albums found. Try adding the artist or changing the search.';
+    const options = candidates.filter(candidate => {
+      const formats = candidate.selected_formats || (candidate.flac_files === candidate.matching_files ? ['flac'] : []);
+      return formats.length === 1 && formats[0] === format &&
+        (format === 'mp3' || candidate.candidate_id) && (!bitrate || candidate.minimum_kbps >= bitrate);
+    });
+    const label = format.toUpperCase();
+    status.textContent = options.length
+      ? (format === 'mp3' ? 'MP3 results are for lookup in Nicotine+.' : 'Choose a download. Track its progress in Activity.')
+      : 'No matching ' + label + ' albums. Try a different search or bitrate.';
     let visible = 0;
     const moreRow = element('li');
     const more = element('button', 'View more');
@@ -434,12 +453,14 @@ get('soulseek-form').addEventListener('submit', async event => {
       list.append(...options.slice(visible, visible + 5).map(candidate => {
       const row = element('li');
       const title = element('div');
-      title.append(element('strong', candidate.folder.split('\\').pop() || album.album),
-        element('small', candidate.flac_files + ' FLAC tracks found · ' + candidate.peer + ' · ' + candidateDetails(candidate), 'muted'));
+      title.append(element('strong', candidate.folder.split('\\').pop() || album?.album || query),
+        element('small', candidate.matching_files + ' ' + label + ' tracks · ' + candidate.peer + ' · ' + candidateDetails(candidate) +
+          (candidate.minimum_kbps ? ' · ' + candidate.minimum_kbps + '+ kbps estimated' : ''), 'muted'));
       const button = element('button', 'Download', 'primary');
-      button.setAttribute('aria-label', 'Download FLACs from ' + candidate.peer);
+      button.setAttribute('aria-label', 'Download ' + label + ' from ' + candidate.peer);
       button.addEventListener('click', () => queueAlbum(candidate, album));
-      row.append(title, button);
+      row.append(title);
+      if (candidate.candidate_id) row.append(button);
       return row;
       }));
       visible += 5;

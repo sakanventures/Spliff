@@ -461,3 +461,13 @@ html:not(.advanced-mode) :is(#sync-details, #download-details, #inline-options d
 #metadata-plan li { overflow-wrap: anywhere; }
 #metadata-plan li small { display: block; }
 #metadata-plan details { margin-block: 12px; }
+
+#albums-panel { width: 100%; }
+#soulseek-form { display: flex; flex-wrap: wrap; align-items: end; gap: 8px; margin-block: 12px; }
+#soulseek-form > label { flex: 1 1 18rem; }
+.music-search-controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+@media (max-width: 650px) {
+  .workspace-nav #advanced { order: 1; width: 100%; flex-wrap: wrap; }
+  .companion main { padding-inline: 16px; }
+  #review-choices > div { grid-template-columns: 1fr; }
+}
