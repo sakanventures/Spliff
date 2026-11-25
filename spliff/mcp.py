@@ -13,7 +13,7 @@ from .nicotine import TransferError, request as nicotine_request, transfer_readi
 from .nicotine import search as search_nicotine
 from .staged_downloads import applied_transfer, list_downloads, queue, review_download, transfer_status as read_transfer_status
 from .spectral import analyze_track, analyze_download
-from . import album_actions, album_rollback, keep_both, sync
+from . import album_actions, album_rollback, keep_both, mcp_confirmation, sync
 from .staged_downloads import local_transfer, public_status
 from .candidates import refresh as refresh_candidate
 from .artist import library as artist_library, upgrades as artist_upgrades, index_folder, search_for_chat
@@ -151,8 +151,7 @@ def form_method(version, capabilities):
     return None
 
 
-def confirm_album_action(review, incoming, parent_id, method="elicitation/create"):
-    request_id = f"spliff-confirm-{uuid4().hex}"
+def confirmation_form(review):
     label = {"replace": "Replace", "keep": "Keep both / Add to library",
              "rollback": "Roll back this replacement", "probe": "test this confirmation dialog only"}[review["mode"]]
     paths = []
@@ -171,12 +170,16 @@ def confirm_album_action(review, incoming, parent_id, method="elicitation/create
                 paths.append("Recording identity is unresolved. Approval accepts this exception. "
                              + json.dumps(evidence))
     message = f"Authorize Spliff to {label}?\n" + "\n".join(paths)
+    title = "Confirm this diagnostic only" if review["mode"] == "probe" else "Authorize these exact file operations"
+    return {"mode": "form", "message": message,
+            "requestedSchema": {"type": "object", "properties": {
+                "authorize": {"type": "boolean", "title": title, "default": False}}, "required": ["authorize"]}}
+
+
+def confirm_album_action(review, incoming, parent_id, method="elicitation/create"):
+    request_id = f"spliff-confirm-{uuid4().hex}"
     print(json.dumps({"jsonrpc": "2.0", "id": request_id, "method": method,
-                      "params": {"mode": "form", "message": message,
-                                 "requestedSchema": {"type": "object", "properties": {
-                                     "authorize": {"type": "boolean", "title": "Authorize these exact file operations",
-                                                   "default": False}},
-                                     "required": ["authorize"]}}}), flush=True)
+                      "params": confirmation_form(review)}), flush=True)
     for line in incoming:
         try:
             packet = json.loads(line)
@@ -189,11 +192,7 @@ def confirm_album_action(review, incoming, parent_id, method="elicitation/create
             if isinstance(params, dict) and params.get("requestId") == parent_id:
                 return False
         if packet.get("id") == request_id and "method" not in packet:
-            result = packet.get("result")
-            if "error" in packet or not isinstance(result, dict) or result.get("action") != "accept":
-                return False
-            content = result.get("content")
-            return isinstance(content, dict) and content == {"authorize": True} and content["authorize"] is True
+            return "error" not in packet and mcp_confirmation.accepted(packet.get("result"))
         if "id" in packet and "method" in packet:
             if packet["method"] == "ping":
                 respond(packet["id"], {})
@@ -363,6 +362,27 @@ OPEN_WORLD = {"search_nicotine", "search_discogs_releases", "get_discogs_release
 
 VERSIONS = {"2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25"}
 
+
+SERVER_INFO = {"name": "spliff", "title": "Spliff", "version": "0.1.4"}
+
+
+def confirmation_diagnostics(version, capabilities, method, *, transport):
+    extensions = capabilities.get("extensions")
+    extensions = extensions if isinstance(extensions, dict) else {}
+    core = capabilities.get("elicitation")
+    openai = extensions.get(mcp_confirmation.OPENAI_FORM)
+    return {"offered_protocol": version,
+            "negotiated_protocol": version if transport == "per_request" or version in VERSIONS else "2025-11-25",
+            "capability_names": sorted(capabilities),
+            "core_elicitation_modes": sorted(core) if isinstance(core, dict) else None,
+            "openai_elicitation_modes": sorted(openai) if isinstance(openai, dict) else None,
+            "confirmation_method": method, "protocol_context": transport}
+
+
+def modern_result(result):
+    return {"resultType": "complete", **result,
+            "_meta": {mcp_confirmation.PREFIX + "serverInfo": SERVER_INFO}}
+
 def serve(db, search_only=False, allow_downloads=False, allow_discogs=False, dashboard_port=8765):
     local_search = ("search_nicotine", "For a bare artist name, inspect the owned local releases first "
         "and search for their upgrades. Defaults to auto: an unindexed name returns instructions to "
@@ -391,8 +411,9 @@ def serve(db, search_only=False, allow_downloads=False, allow_discogs=False, das
         instructions = "Use artist_library to inspect owned releases and index_music_folder for a selected folder."
     initialized = False
     incoming = iter(sys.stdin)
-    confirmation_method = None
+    legacy_method = None
     handshake = {}
+    pending = mcp_confirmation.Confirmations()
     for line in incoming:
         request_id = None
         try:
@@ -412,40 +433,53 @@ def serve(db, search_only=False, allow_downloads=False, allow_discogs=False, das
         if not isinstance(params, dict):
             respond(request_id, error=(-32602, "Invalid params"))
             continue
-        if method == "initialize":
+        meta = params.get("_meta")
+        meta = meta if isinstance(meta, dict) else {}
+        protocol_key = mcp_confirmation.PREFIX + "protocolVersion"
+        modern = method == "server/discover" or protocol_key in meta
+        confirmation_method = legacy_method
+        call_diagnostics = handshake
+        if modern:
+            version = meta.get(protocol_key)
+            capabilities = meta.get(mcp_confirmation.PREFIX + "clientCapabilities")
+            if not isinstance(version, str) or not isinstance(capabilities, dict):
+                respond(request_id, error=(-32602, "Modern MCP requests require protocol and client capabilities."))
+                continue
+            if version != mcp_confirmation.VERSION:
+                respond(request_id, error=(-32022, "Unsupported protocol version",
+                        {"supported": [mcp_confirmation.VERSION, *sorted(VERSIONS)], "requested": version}))
+                continue
+            form_kind = mcp_confirmation.form_kind(capabilities) if allow_downloads and not search_only else None
+            confirmation_method = "mrtr_" + form_kind if form_kind else None
+            call_diagnostics = confirmation_diagnostics(version, capabilities, confirmation_method,
+                                                         transport="per_request")
+        if method == "server/discover":
+            print("Spliff MCP discovery " + json.dumps(call_diagnostics), file=sys.stderr, flush=True)
+            respond(request_id, modern_result({"supportedVersions": [mcp_confirmation.VERSION, *sorted(VERSIONS)],
+                                              "capabilities": {"tools": {}}, "instructions": instructions}))
+        elif method == "initialize":
             version = params.get("protocolVersion")
             if not isinstance(version, str):
                 respond(request_id, error=(-32602, "Protocol version required"))
                 continue
-            # The tunnel reuses its stdio child across discovery sessions. Reset
-            # authorization capability on each initialize, including discovery.
-            capabilities = params.get("capabilities", {})
+            capabilities = params.get("capabilities")
             capabilities = capabilities if isinstance(capabilities, dict) else {}
-            extensions = capabilities.get("extensions")
-            extensions = extensions if isinstance(extensions, dict) else {}
-            confirmation_method = form_method(version, capabilities) if allow_downloads and not search_only else None
-            handshake = {"offered_protocol": version,
-                         "negotiated_protocol": version if version in VERSIONS else "2025-11-25",
-                         "capability_names": sorted(capabilities),
-                         "core_elicitation_modes": sorted(capabilities["elicitation"])
-                         if isinstance(capabilities.get("elicitation"), dict) else None,
-                         "openai_elicitation_modes": sorted(extensions["openai/elicitation"])
-                         if isinstance(extensions.get("openai/elicitation"), dict) else None,
-                         "confirmation_method": confirmation_method}
+            legacy_method = form_method(version, capabilities) if allow_downloads and not search_only else None
+            handshake = confirmation_diagnostics(version, capabilities, legacy_method, transport="initialize")
             print("Spliff MCP handshake " + json.dumps(handshake), file=sys.stderr, flush=True)
             initialized = True
             respond(request_id, {
                 "protocolVersion": version if version in VERSIONS else "2025-11-25",
-                "serverInfo": {"name": "spliff", "title": "Spliff", "version": "0.1.3"},
+                "serverInfo": SERVER_INFO,
                 "capabilities": {"tools": {}},
                 "instructions": instructions,
             })
         elif method == "ping":
-            respond(request_id, {})
-        elif not initialized:
+            respond(request_id, modern_result({}) if modern else {})
+        elif not initialized and not modern:
             respond(request_id, error=(-32002, "Initialize the server first"))
         elif method == "tools/list":
-            respond(request_id, {"tools": [
+            result = {"tools": [
                 {"name": name, "description": description,
                  "inputSchema": {"type": "object", "properties": properties,
                                  "additionalProperties": False,
@@ -453,7 +487,8 @@ def serve(db, search_only=False, allow_downloads=False, allow_discogs=False, das
                  "annotations": {"readOnlyHint": name not in WRITES, "openWorldHint": name in OPEN_WORLD,
                                  "destructiveHint": name in {"apply_album_action", "rollback_album_action"}}}
                 for name, description, properties, _ in available
-            ]})
+            ]}
+            respond(request_id, modern_result(result) if modern else result)
         elif method == "tools/call":
             arguments = params.get("arguments", {})
             tool = next((tool for tool in available if tool[0] == params.get("name")), None)
@@ -461,16 +496,27 @@ def serve(db, search_only=False, allow_downloads=False, allow_discogs=False, das
                     REQUIRED.get(tool[0], ())).issubset(arguments):
                 respond(request_id, error=(-32602, "Unknown tool or invalid arguments"))
                 continue
+            resuming = "requestState" in params or "inputResponses" in params
+            if resuming and (not modern or not confirmation_method or tool[0] not in {
+                    "apply_album_action", "rollback_album_action", "spliff_confirmation_diagnostics"}):
+                respond(request_id, error=(-32602, "This request has no supported in-chat confirmation."))
+                continue
+
+            def confirm(review):
+                if modern:
+                    return pending.confirm(request_id, params, form_kind, review, confirmation_form(review))
+                return confirm_album_action(review, incoming, request_id, confirmation_method)
+
             try:
                 if tool[3] is transfer_readiness:
                     payload = {**tool[3](), "settings_url": f"http://127.0.0.1:{dashboard_port}/?settings=1"}
                 elif tool[0] == "spliff_confirmation_diagnostics":
-                    payload = {**handshake, "album_confirmation_route": (
+                    payload = {**call_diagnostics, "album_confirmation_route": (
                         "host_form" if confirmation_method else "local_approval")}
                     if arguments.get("probe") is True:
-                        payload["probe"] = ("accepted" if confirm_album_action({"mode": "probe", "files": []},
-                                            incoming, request_id, confirmation_method) else "declined_or_unsupported"
-                                            ) if confirmation_method else "no_negotiated_form"
+                        payload["probe"] = ("accepted" if confirm({"mode": "probe", "files": []})
+                                            else "declined_or_unsupported") if confirmation_method else "no_negotiated_form"
+                    print("Spliff MCP confirmation diagnostic " + json.dumps(payload), file=sys.stderr, flush=True)
                 elif tool[3] is review_for_chat:
                     payload = review_for_chat(db, dashboard_port=dashboard_port,
                                               host_confirmation=bool(confirmation_method), **arguments)
@@ -495,8 +541,7 @@ def serve(db, search_only=False, allow_downloads=False, allow_discogs=False, das
                     if not confirmation_method:
                         raise ValueError("This MCP session did not negotiate form confirmation. "
                                          "Spliff cannot authorize album file changes through this session.")
-                    payload = tool[3](db, **arguments,
-                                                  confirm=lambda review: confirm_album_action(review, incoming, request_id, confirmation_method))
+                    payload = tool[3](db, **arguments, confirm=confirm)
                 else:
                     payload = tool[3](db, **arguments)
                 if tool[0] in ("analyze_library_spectrum", "analyze_download_spectrum"):
@@ -512,6 +557,8 @@ def serve(db, search_only=False, allow_downloads=False, allow_discogs=False, das
                     if tool[3] in (album_actions.preview, album_actions.apply, album_actions.status, album_actions.inspect_recovery,
                                    album_rollback.rollback, review_for_chat):
                         result["structuredContent"] = payload
+            except mcp_confirmation.InputRequired as exc:
+                result = exc.result
             except TransferError as exc:
                 payload = {"code": exc.code, "message": str(exc),
                            "settings_url": f"http://127.0.0.1:{dashboard_port}/?settings=1"}
@@ -526,7 +573,7 @@ def serve(db, search_only=False, allow_downloads=False, allow_discogs=False, das
                 else:
                     message = str(exc) if isinstance(exc, ValueError) else "Catalog unavailable"
                     result = {"isError": True, "content": [{"type": "text", "text": message}]}
-            respond(request_id, result)
+            respond(request_id, modern_result(result) if modern else result)
         else:
             respond(request_id, error=(-32601, "Method not found"))
 
@@ -534,6 +581,8 @@ def respond(request_id, result=None, error=None):
     packet = {"jsonrpc": "2.0", "id": request_id}
     if error:
         packet["error"] = {"code": error[0], "message": error[1]}
+        if len(error) > 2:
+            packet["error"]["data"] = error[2]
     else:
         packet["result"] = result
     print(json.dumps(packet), flush=True)
