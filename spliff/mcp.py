@@ -12,7 +12,7 @@ from .review import reviews
 from .nicotine import TransferError, request as nicotine_request, transfer_readiness
 from .nicotine import search as search_nicotine
 from .staged_downloads import applied_transfer, list_downloads, queue, review_download, transfer_status as read_transfer_status
-from .spectral import analyze_track, analyze_download
+from .spectral import AlbumJobs, analyze_track, analyze_download
 from . import album_actions, album_rollback, keep_both, mcp_confirmation, sync
 from .staged_downloads import local_transfer, public_status
 from .candidates import refresh as refresh_candidate
@@ -26,8 +26,9 @@ def local_approval_url(port, plan_id):
     return f"http://127.0.0.1:{port}/album-approval?" + urlencode({"plan": plan_id})
 
 
-def review_for_chat(db, candidate_id, original_track_id=None, *, dashboard_port=8765, host_confirmation=None):
-    result = review_download(db, candidate_id, original_track_id)
+def review_for_chat(db, candidate_id, original_track_id=None, *, dashboard_port=8765,
+                    host_confirmation=None, research_edition=False):
+    result = review_download(db, candidate_id, original_track_id, research=research_edition)
     if host_confirmation is not None and result["items"] and result["complete"] == len(result["items"]) and not result["kept_both"]:
         original = result["comparison"]["original_track_id"] if result["comparison"] else None
         options, blocked, diagnostics = {}, {}, {}
@@ -285,6 +286,14 @@ DOWNLOAD_TOOLS = [
      {"candidate_id": {"type": "string"}}, album_actions.inspect_recovery),
     ("get_album_action_status", "Read the committed album action and its recovery information.",
      {"candidate_id": {"type": "string"}}, album_actions.status),
+    ("analyze_album_spectrum", "Start a background spectral analysis of all downloads and mapped originals. "
+     "Read album_spectrum_status with the returned job ID. Supply start and limit to retry selected tracks.",
+     {"candidate_id": {"type": "string"}, "original_track_id": {"type": "integer", "minimum": 1},
+      "start": {"type": "integer", "minimum": 0},
+      "limit": {"type": "integer", "minimum": 1, "maximum": 60}}, None),
+    ("album_spectrum_status", "Read the batch summary and per-track failures. Use analyze_download_spectrum "
+     "with a listed zero-based index to open original and download images.",
+     {"job_id": {"type": "string"}}, None),
     ("analyze_download_spectrum", "Generate a spectrogram for one completed download and its matched "
      "original when available. Review before Keep both or Replace. Index is zero-based. "
      "Do not infer genuine lossless provenance from spectral content alone.",
@@ -303,9 +312,10 @@ DOWNLOAD_TOOLS = [
     ("review_nicotine_download",
      "Review the completed download from list_nicotine_transfers. Return reviewed Keep both and Replace "
      "plans. Show exact destinations and recording discrepancies before the user chooses. "
-     "Use the approval method returned by this session.",
-     {"candidate_id": {"type": "string"}, "original_track_id": {"type": "integer", "minimum": 1}},
-     review_for_chat),
+     "Use the approval method returned by this session. Set research_edition to corroborate the album tracklist "
+     "with Discogs if enabled.",
+     {"candidate_id": {"type": "string"}, "original_track_id": {"type": "integer", "minimum": 1},
+      "research_edition": {"type": "boolean"}}, review_for_chat),
 ]
 APPLY_TOOL = (
     "apply_album_action",
@@ -351,19 +361,21 @@ REQUIRED = {"search_nicotine": ["query"], "search_discogs_releases": ["artist", 
             "artist_library": ["artist"], "search_artist_upgrades": ["artist"],
             "index_music_folder": ["folder"], "sync_music_folder": ["folder"],
             "analyze_library_spectrum": ["track_id"], "analyze_download_spectrum": ["candidate_id"],
+            "analyze_album_spectrum": ["candidate_id"], "album_spectrum_status": ["job_id"],
             "get_discogs_release": ["release_id"], "stage_nicotine_download": ["candidate_id"],
             "review_nicotine_download": ["candidate_id"]}
 WRITES = {"stage_nicotine_download", "connect_discogs", "replacement_preference", "index_music_folder",
-          "sync_music_folder", "review_nicotine_download", "preview_album_action", "apply_album_action", "rollback_album_action", "authorize_nicotine_retry"}
+          "sync_music_folder", "review_nicotine_download", "preview_album_action", "apply_album_action", "rollback_album_action",
+          "authorize_nicotine_retry", "analyze_album_spectrum"}
 OPEN_WORLD = {"search_nicotine", "search_discogs_releases", "get_discogs_release",
               "refresh_nicotine_candidate", "nicotine_transfer_status",
-              "search_artist_upgrades", "find_nicotine_alternatives",
+              "search_artist_upgrades", "find_nicotine_alternatives", "review_nicotine_download",
               "stage_nicotine_download", "connect_discogs", "sync_music_folder"}
 
 VERSIONS = {"2024-11-05", "2025-03-26", "2025-06-18", "2025-11-25"}
 
 
-SERVER_INFO = {"name": "spliff", "title": "Spliff", "version": "0.1.4"}
+SERVER_INFO = {"name": "spliff", "title": "Spliff", "version": "0.1.5"}
 
 
 def confirmation_diagnostics(version, capabilities, method, *, transport):
@@ -414,6 +426,7 @@ def serve(db, search_only=False, allow_downloads=False, allow_discogs=False, das
     legacy_method = None
     handshake = {}
     pending = mcp_confirmation.Confirmations()
+    spectral_jobs = AlbumJobs(db)
     for line in incoming:
         request_id = None
         try:
@@ -517,7 +530,13 @@ def serve(db, search_only=False, allow_downloads=False, allow_discogs=False, das
                         payload["probe"] = ("accepted" if confirm({"mode": "probe", "files": []})
                                             else "declined_or_unsupported") if confirmation_method else "no_negotiated_form"
                     print("Spliff MCP confirmation diagnostic " + json.dumps(payload), file=sys.stderr, flush=True)
+                elif tool[0] == "analyze_album_spectrum":
+                    payload = spectral_jobs.start(**arguments)
+                elif tool[0] == "album_spectrum_status":
+                    payload = spectral_jobs.status(**arguments)
                 elif tool[3] is review_for_chat:
+                    if arguments.get("research_edition") and not allow_discogs:
+                        raise ValueError("Discogs research is unavailable on this connection.")
                     payload = review_for_chat(db, dashboard_port=dashboard_port,
                                               host_confirmation=bool(confirmation_method), **arguments)
                 elif tool[3] is album_actions.preview:
@@ -555,10 +574,15 @@ def serve(db, search_only=False, allow_downloads=False, allow_discogs=False, das
                 else:
                     result = {"content": [{"type": "text", "text": json.dumps(payload)}]}
                     if tool[3] in (album_actions.preview, album_actions.apply, album_actions.status, album_actions.inspect_recovery,
-                                   album_rollback.rollback, review_for_chat):
+                                   album_rollback.rollback, review_for_chat) or tool[0] in {
+                                       "analyze_album_spectrum", "album_spectrum_status"}:
                         result["structuredContent"] = payload
             except mcp_confirmation.InputRequired as exc:
                 result = exc.result
+            except keep_both.RecordingReviewBlocked as exc:
+                payload = {"status": "blocked", "reason": str(exc), "eligible": 0, "skipped": exc.skipped}
+                result = {"isError": True, "structuredContent": payload,
+                          "content": [{"type": "text", "text": json.dumps(payload)}]}
             except TransferError as exc:
                 payload = {"code": exc.code, "message": str(exc),
                            "settings_url": f"http://127.0.0.1:{dashboard_port}/?settings=1"}

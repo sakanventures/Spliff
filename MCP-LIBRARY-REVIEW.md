@@ -69,3 +69,28 @@ The link identifies an expiring plan. Loading it only displays the review and is
 Spliff 0.1.4 implements per-request MCP metadata and multi-round-trip form confirmation for both core MCP and the OpenAI form extension. A prompted call returns a random, short-lived continuation that binds the tool, arguments, form dialect and exact reviewed plan. The server consumes it on the matching continuation. Existing transaction validation and single-use album authorization still apply. A tunnel restart expires pending prompts.
 
 The installed ChatGPT connector successfully discovered and invoked Spliff using MCP `2026-07-28`. Its live `spliff_confirmation_diagnostics(probe=true)` request advertised `experimental` and `extensions`, with neither core nor OpenAI form elicitation. The result was `no_negotiated_form` and the route remained `local_approval`. No music or staged files were changed during the live test. The in-chat form exchange is covered by local protocol tests and requires a live client that advertises form support before it can be verified end to end in ChatGPT. [MCP multi-round-trip requests](https://modelcontextprotocol.io/specification/2026-07-28/basic/patterns/mrtr) · [OpenAI form extension](https://github.com/openai/mcp-extensions/blob/main/docs/spec.md#openai-form-elicitation)
+
+## Recording verification and batch spectra
+
+Replacement review uses the embedded title and credits when available, then checks normalized filenames, known artist and album prefixes, disc and track position, and release context. The position can nominate a recording for comparison. It cannot establish recording identity. Explicit version conflicts, ambiguous duplicates, protected originals, and failed audio checks remain excluded. When enabled, sync or `review_nicotine_download(research_edition=true)` can corroborate edition details using Discogs.
+
+The strict replacement review first attempts waveform alignment. With local `fpcalc` installed, an inconclusive waveform result can be corroborated by a near-full-length Chromaprint match and a similar audio envelope. A short, weak, or conflicting fingerprint stays blocked. This checks recording identity independently of the fidelity of the FLAC. Candidate files are decoded before approval and verified again on installation. [Chromaprint](https://acoustid.org/chromaprint)
+
+Use `analyze_album_spectrum(candidate_id, original_track_id?, start?, limit?)` to start a background batch. Poll `album_spectrum_status(job_id)` for the result and each track's status. A repeat request can target a range using its zero-based `start` and `limit`. The process caches successful results by file identity, size, modification time, and change time. Use the returned track index with `analyze_download_spectrum` to open the cached individual images. The batch reports rolloff, band energy, and possible low-pass boundaries. A low-pass indicator can reflect mastering or prior encoding and does not identify a lossy transcode. Jobs and cached images expire on a service restart.
+
+The tool manifest changed in 0.1.5. Restart the local dashboard and tunnel after installing the revised package, then refresh Spliff's tools in ChatGPT. Install `fpcalc` where the local services can find it to enable the optional fingerprint comparison.
+
+### Roy Ayers regression
+
+The four staged albums were reprocessed with a disposable catalog and the official Chromaprint 1.6.2 binary. The baseline came from the same staged files with the previous verifier.
+
+| Album | Tracks | Eligible before | Eligible with Chromaprint |
+| --- | ---: | ---: | ---: |
+| In the Dark | 11 | 0 | 11 |
+| Love Fantasy | 6 | 0 | 0 |
+| Nasté | 13 | 8 | 12 |
+| Wake Up | 7 | 2 | 6 |
+
+The filename fallback resolved missing tags on *In the Dark*. *Love Fantasy* now reaches acoustic comparison for all six tracks, but the fingerprints fall below the threshold. The *Nasté* track “Nonsense” exceeds the alignment window, and its fingerprint has too many unmatched frames. “Suavé” on *Wake Up* reaches comparison after normalizing the accent, but its envelope does not corroborate the fingerprint strongly enough for automatic replacement.
+
+The batch analyzed all 37 downloads and compared all 37 against their corresponding originals. These files produced no abrupt-band-drop flags under the current heuristic. This result provides no guarantee of source provenance.

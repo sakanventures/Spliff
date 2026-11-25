@@ -4,6 +4,7 @@ import errno
 import hashlib
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -29,9 +30,15 @@ RECEIPT_NAME = "job.json"
 
 
 class RecordingReviewBlocked(ValueError):
-    def __init__(self, skipped):
-        super().__init__(skipped[-1]["reason"])
+    def __init__(self, skipped, message=None):
+        super().__init__(message or skipped[-1]["reason"])
         self.skipped = skipped
+
+
+def excluded(item, reason, code, **evidence):
+    original_id = item.get("id") or (item.get("original") or {}).get("id")
+    return {"download": Path(item["flac"]).name if "flac" in item else item.get("name") or Path(item["source"]).name,
+            "original_track_id": original_id, "reason": reason, "reason_code": code, **evidence}
 
 
 @contextmanager
@@ -136,19 +143,31 @@ def get_plan(db, candidate, original, mode="keep", *, strict=False, overrides=()
     items = review["items"]
     if not items or review["complete"] != len(items) or not review["comparison"]:
         raise ValueError("Wait until the download finishes and Spliff identifies the original release.")
+    eligible_assessments = MATCH_ASSESSMENTS | {"metadata fallback"}
+    if strict:
+        eligible_assessments |= {"check duration", "check release tags"}
+    matched = []
     skipped = []
-    matched = [item for item in items if item.get("assessment") in MATCH_ASSESSMENTS or (
-        strict and item.get("assessment") in {"check duration", "check release tags"}
-        and item.get("original") and item["audio"]["quality"] == "lossless")]
+    for item in items:
+        assessment = item.get("assessment", "audio inspection failed")
+        if assessment in eligible_assessments and item.get("original"):
+            matched.append(item)
+        else:
+            code = re.sub(r"[^a-z0-9]+", "_", assessment.lower()).strip("_")
+            skipped.append(excluded(item, assessment, code))
     if strict:
         counts = {}
-        for item in items:
-            if item.get("original"):
-                key = item["original"]["id"]
-                counts[key] = counts.get(key, 0) + 1
-        matched = [item for item in matched if counts[item["original"]["id"]] == 1]
-    skipped.extend({"download": item.get("name") or Path(item["source"]).name, "reason": item.get("assessment", "Audio inspection failed")}
-                   for item in items if item not in matched)
+        for item in matched:
+            identifier = item["original"]["id"]
+            counts[identifier] = counts.get(identifier, 0) + 1
+        unique = []
+        for item in matched:
+            if counts[item["original"]["id"]] > 1:
+                skipped.append(excluded(item, "Multiple staged tracks match the same original",
+                                        "ambiguous_duplicate_recording"))
+            else:
+                unique.append(item)
+        matched = unique
     pairs = []
     root = folder = None
     identities = {}
@@ -166,7 +185,10 @@ def get_plan(db, candidate, original, mode="keep", *, strict=False, overrides=()
                 WHERE t.id=? AND t.present=1 AND t.error IS NULL
             """, (item["original"]["id"],)).fetchone()
             if not track or track["quality"] != "lossy" or track["protected"]:
-                skipped.append({"download": item.get("name") or Path(item["source"]).name, "reason": "Original is unavailable, protected, or already lossless"})
+                reason, code = (("Original is unavailable", "original_unavailable") if not track else
+                                ("Original is protected", "original_protected") if track["protected"] else
+                                ("Original is already lossless", "original_not_lossy"))
+                skipped.append(excluded(item, reason, code))
                 continue
             track_root = Path(track["root"])
             mp3 = track_root / track["path"]
@@ -194,7 +216,7 @@ def get_plan(db, candidate, original, mode="keep", *, strict=False, overrides=()
             suffix = staged.suffix.lower()
             allowed = {"flac", "wav", "wave", "aif", "aiff", "alac", "m4a", "ape", "wv", "dsf"}
             if suffix.lstrip(".") not in allowed:
-                skipped.append({"download": item.get("name") or Path(item["source"]).name, "reason": "Unsupported lossless file extension"})
+                skipped.append(excluded(item, "Unsupported lossless file extension", "unsupported_extension"))
                 continue
             final = mp3.with_suffix(suffix)
             if final == mp3:
@@ -204,7 +226,7 @@ def get_plan(db, candidate, original, mode="keep", *, strict=False, overrides=()
                           "relative": str(final.relative_to(folder)), "audio": item["audio"],
                           "assessment": item["assessment"], "recording_evidence": item.get("recording_evidence")})
     if not pairs:
-        raise ValueError("No confident, unprotected lossless upgrades are ready to apply.")
+        raise RecordingReviewBlocked(skipped, "No confident, unprotected lossless upgrades are ready to apply.")
     if folder.name.casefold() in {"mp3", ".spliff-originals"}:
         raise ValueError("Choose the main album folder instead of an MP3 archive.")
 
@@ -219,13 +241,13 @@ def get_plan(db, candidate, original, mode="keep", *, strict=False, overrides=()
         key = name_key(pair["relative"])
         if key in destinations or any(name_key(path.name) == name_key(final.name)
                                       for path in final.parent.iterdir()):
-            skipped.append({"download": Path(pair["flac"]).name, "reason": "Destination already exists"})
+            skipped.append(excluded(pair, "Destination already exists", "destination_collision"))
             continue
         destinations.add(key)
         available.append(pair)
     pairs = available
     if not pairs:
-        raise ValueError("A lossless file with the same name already exists in the album folder.")
+        raise RecordingReviewBlocked(skipped, "A lossless file with the same name already exists in the album folder.")
     archive_name = {"keep": MP3_FOLDER, "hidden": HIDDEN_ARCHIVE}.get(original_mode)
     if archive_name and name_key(archive_name) in names:
         archive_name = str(Path(archive_name) / candidate)
@@ -239,27 +261,34 @@ def get_plan(db, candidate, original, mode="keep", *, strict=False, overrides=()
     largest = max(max(copies), *(pair["mp3_sig"][0] for pair in pairs))
     if sum(copies) + largest > shutil.disk_usage(folder).free:
         raise ValueError("There is not enough free space to copy the FLAC album.")
-    # Decode and render every pair before offering confirmation, and revalidate on apply.
-    # This establishes readable spectral evidence, never an authenticity verdict.
+    # Fully decode candidates before offering confirmation. Render images only in Advanced Review.
     ready = []
     for pair in pairs:
         try:
-            original = analyze_file(pair["mp3"], pair["mp3_sig"])
-            download = analyze_file(pair["flac"], pair["flac_sig"])
+            original = analyze_file(pair["mp3"], pair["mp3_sig"], render_image=False)
+            download = analyze_file(pair["flac"], pair["flac_sig"], render_image=False)
             evidence = compare_measurements(original, download)
             if evidence["status"] == "Download appears silent":
-                raise ValueError(evidence["status"])
-            if strict:
+                skipped.append(excluded(pair, evidence["status"], "candidate_silent"))
+                continue
+            if strict or pair["assessment"] == "metadata fallback":
                 try:
                     recording = compare_recordings(pair["mp3"], pair["mp3_sig"], pair["flac"], pair["flac_sig"])
                 except ValueError as exc:
                     recording = {"matched": False, "reason": str(exc)}
-                verified = recording["matched"] and evidence["status"] != "Different audio envelope"
+                fingerprint_match = recording.get("fingerprint", {}).get("matched")
+                verified = recording["matched"] and (
+                    evidence["status"] == "Similar audio envelope" if fingerprint_match else
+                    evidence["status"] != "Different audio envelope")
                 overridden = not verified and pair["id"] in overrides
                 if not verified and not overridden:
-                    skipped.append({"download": Path(pair["flac"]).name, "original_track_id": pair["id"],
-                                    "reason": "Recording identity is uncertain or conflicting",
-                                    "recording_evidence": recording, "audio_evidence": evidence})
+                    reason_code = ("audio_envelope_conflict" if evidence["status"] == "Different audio envelope" else
+                                   "fingerprint_requires_corroboration" if fingerprint_match else
+                                   "recording_alignment_window" if recording.get("reason") else
+                                   "fingerprint_below_threshold" if recording.get("fingerprint") else
+                                   "waveform_below_threshold")
+                    skipped.append(excluded(pair, "Recording identity is uncertain or conflicting", reason_code,
+                                            recording_evidence=recording, audio_evidence=evidence))
                     continue
                 pair["recording_evidence"] = {**recording, "confidence": "verified match" if verified else
                                               "uncertain match", "overridden": overridden}
@@ -272,7 +301,7 @@ def get_plan(db, candidate, original, mode="keep", *, strict=False, overrides=()
             pair["original_digest"] = verified_digest(Path(pair["mp3"]), pair["mp3_sig"])
             pair["download_digest"] = verified_digest(Path(pair["flac"]), pair["flac_sig"])
         except (OSError, ValueError) as exc:
-            skipped.append({"download": Path(pair["flac"]).name, "reason": str(exc)})
+            skipped.append(excluded(pair, str(exc), "audio_verification_failed"))
         else:
             ready.append(pair)
     if overrides and set(overrides) != {pair["id"] for pair in ready
@@ -314,7 +343,7 @@ def preview(db, candidate, original, mode="keep", *, strict=False, overrides=())
                           if plan["original_mode"] != "trash" else "Mac Trash"}
                          for pair in plan["pairs"]],
                "edition_evidence": plan["edition_evidence"],
-               "audio_review": "Full decode and spectrum generated. Lossless provenance remains unknown."}
+               "audio_review": "Full audio decode and recording comparison completed. Spectrograms are available in Advanced Review."}
     if strict:
         return preview
     with closing(connect(db)) as connection, connection:
@@ -575,7 +604,7 @@ def apply(db, candidate, original, token, mode="keep", *, receipt=None, trusted_
                 published.append((final, fingerprint))
                 verify_published(final, fingerprint, digest)
                 if pair["recording_evidence"]:
-                    analyze_file(final, fingerprint)
+                    analyze_file(final, fingerprint, render_image=False)
                 columns = ("root", "path", *AUDIO_FIELDS, "size", "mtime", "device", "inode")
                 connection.execute(
                     f"INSERT INTO tracks({','.join(columns)}) VALUES ({','.join('?' for _ in columns)})",

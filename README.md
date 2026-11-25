@@ -6,7 +6,7 @@ Spliff is a local music catalog and lossless-upgrade review tool for macOS. It r
 
 ## Start on a Mac
 
-Requirements are Python 3.9 or newer and FFmpeg on your PATH. If you use Homebrew, install FFmpeg with `brew install ffmpeg`. Install from the project directory. For a first scan, choose a small music folder in the dashboard.
+Requirements are Python 3.9 or newer and FFmpeg on your PATH. Optional Chromaprint (`fpcalc`) adds a local fingerprint comparison when waveform evidence falls short. Spliff looks for `fpcalc` on PATH or alongside the Python executable. On macOS, Homebrew provides it with `brew install chromaprint`. Fingerprints stay on the Mac. If you use Homebrew, install FFmpeg with `brew install ffmpeg`. Install from the project directory. For a first scan, choose a small music folder in the dashboard.
 
 ```sh
 python3 -m venv .venv

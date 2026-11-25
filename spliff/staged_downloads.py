@@ -175,7 +175,7 @@ def list_downloads(db=None):
 
 
 def title_key(title):
-    return "".join(character for character in unicodedata.normalize("NFKC", title).casefold()
+    return "".join(character for character in unicodedata.normalize("NFKD", title or "").casefold()
                    if character.isalnum())
 
 
@@ -198,7 +198,7 @@ def recording_credit(value):
 
 
 def recording_title(track):
-    return recording_credit(track["title"])[0]
+    return recording_credit(track.get("title"))[0]
 
 
 def same_credit(left, right):
@@ -211,9 +211,38 @@ def track_position(track, filename):
 
 
 
+TRACK_PREFIX = re.compile(r"^(\d{1,3})(?:[ ._-]+|$)")
+DISC_FOLDER = re.compile(r"^(?:cd|disc|disk)[ ._-]*(\d+)$", re.I)
+
+
+def filename_parts(name, *prefixes):
+    title = Path(name).stem.strip()
+    keys = {title_key(prefix) for prefix in prefixes if prefix}
+    number = None
+    while title:
+        match = TRACK_PREFIX.match(title)
+        if match and number is None:
+            number = int(match[1])
+            title = title[match.end():].strip()
+            continue
+        parts = re.split(r"\s+[-–—]\s+", title, maxsplit=1)
+        if len(parts) == 2 and title_key(parts[0]) in keys:
+            title = parts[1].strip()
+            continue
+        break
+    return number, title
+
+
 def filename_number(name):
-    match = re.match(r"^(\d{1,3})[ ._-]+", Path(name).name)
-    return int(match.group(1)) if match else None
+    return filename_parts(name)[0]
+
+
+def disc_position(track, parents):
+    tag = str(track.get("disc_number") or "").split("/")[0]
+    if tag.isdecimal():
+        return int(tag)
+    return next((int(match[1]) for parent in reversed(parents)
+                 if (match := DISC_FOLDER.fullmatch(parent))), None)
 
 
 ORIGINAL_FIELDS = "id,path,artist,album,title,codec,quality,duration,protected,track_number,disc_number"
@@ -259,50 +288,78 @@ def inspect_file(binary, directory, relative, timeout):
 MATCH_ASSESSMENTS = {"possible match", "check track order", "check featured credits", "aligned recording"}
 
 
-def match_item(item, indexed, kind, filename):
+def match_item(item, indexed, kind, filename, *, parents=()):
     if item["quality"] != "lossless":
         return "candidate is not verified lossless", None
     if not indexed:
         return "original not selected", None
+    artist = indexed[0].get("artist")
+    album = indexed[0].get("album")
+    position, filename_title = filename_parts(filename, artist, album)
+    position = track_position(item, filename) or position
+    disc = disc_position(item, parents)
+    tagged_title = recording_title(item)
+    name_title = recording_credit(filename_title)[0]
+    known_release = bool(album and (
+        title_key(item.get("album")) == title_key(album)
+        or any(title_key(parent) in {title_key(album), title_key(f"{artist} {album}")} for parent in parents)
+        or title_key(filename).startswith(title_key(f"{artist} {album}"))))
+
+    def position_matches(track):
+        path = Path(track["path"])
+        old_number, _ = filename_parts(path.name, track.get("artist"), track.get("album"))
+        old_disc = disc_position(track, path.parts[:-1])
+        return position and position == (track_position(track, path.name) or old_number) and (
+            not disc or not old_disc or disc == old_disc)
+
+    def identity_keys(track):
+        _, original_filename = filename_parts(track["path"], track.get("artist"), track.get("album"))
+        return {recording_title(track), recording_credit(original_filename)[0]} - {""}
+
     if kind == "track":
         candidates = indexed
     else:
-        key = recording_title(item)
-        candidates = [track for track in indexed if key and recording_title(track) == key]
+        candidates = [track for track in indexed if tagged_title and tagged_title == recording_title(track)]
         if not candidates:
-            number = filename_number(filename)
-            candidates = [track for track in indexed
-                          if number is not None and filename_number(track["path"]) == number]
+            candidates = [track for track in indexed if name_title and name_title in identity_keys(track)]
+        if len(candidates) > 1:
+            candidates = [track for track in candidates if position_matches(track)] or candidates
+        if not candidates and known_release:
+            # Release and position nominate a candidate. They never verify the recording.
+            candidates = [track for track in indexed if position_matches(track)]
     if len(candidates) != 1:
         return ("ambiguous title" if candidates else "no matching title"), None
     original = candidates[0]
-    if (not item["title"] or not original["title"]
-            or recording_credit(item["title"])[0] != recording_credit(original["title"])[0]
-            or not recording_credit(item["artist"])[0]
-            or recording_credit(item["artist"])[0] != recording_credit(original["artist"])[0]):
+    original_keys = identity_keys(original)
+    if ((tagged_title and VERSION.search(item["title"]) and tagged_title not in original_keys)
+            or (name_title and VERSION.search(filename_title) and name_title not in original_keys)
+            or (VERSION.search(original.get("title") or "")
+                and (tagged_title or name_title) and not original_keys.intersection({tagged_title, name_title}))):
+        return "check recording version", original
+    # A supplied artist conflict is different from a missing artist field.
+    left_artist = recording_credit((item.get("artist") or "").partition("/")[0])[0]
+    right_artist = recording_credit((original.get("artist") or "").partition("/")[0])[0]
+    if left_artist and right_artist and left_artist != right_artist:
         return "check title or artist", original
-    if (not original["duration"] or not item["duration"]
+    old_disc = disc_position(original, Path(original["path"]).parts[:-1])
+    if kind == "album" and disc and old_disc and disc != old_disc:
+        return "check disc order", original
+    if (not original.get("duration") or not item.get("duration")
             or abs(original["duration"] - item["duration"]) > 2):
         return "check duration", original
-    if (kind == "album" and (not original["album"] or not item["album"])
-            or original["album"] and item["album"] and title_key(item["album"]) != title_key(original["album"])):
+    if (kind == "album" and not original.get("album")
+            or original.get("album") and item.get("album") and title_key(item["album"]) != title_key(original["album"])):
         return "check release tags", original
-    # Explicit version cues in a source filename still matter when audio tags omit them.
-    filename_variant = re.search(r"[\[(]([^]()]*)[\])]", Path(filename).stem)
-    if filename_variant and VERSION.search(filename_variant[1]) and title_key(filename_variant[1]) not in title_key(original["title"]):
-        return "check recording version", original
-    guests = [{guest for _, guest in (recording_credit(track[field]) for field in ("title", "artist")) if guest}
+    guests = [{guest for _, guest in (recording_credit(track.get(field)) for field in ("title", "artist")) if guest}
               for track in (item, original)]
     if all(guests) and guests[0] != guests[1]:
         return "check featured credits", original
-    position = track_position(item, filename)
     original_position = track_position(original, original["path"])
     if kind == "album" and position and original_position and position != original_position:
         return "check track order", original
-    disc = str(item.get("disc_number") or "").split("/")[0]
-    original_disc = str(original.get("disc_number") or "").split("/")[0]
-    if kind == "album" and disc.isdecimal() and original_disc.isdecimal() and int(disc) != int(original_disc):
-        return "check disc order", original
+    if (not tagged_title or tagged_title != recording_title(original) or not left_artist or not right_artist
+            or kind == "album" and (not item.get("album") or not original.get("album"))):
+        return "metadata fallback", original
     return "possible match", original
 
 
@@ -332,8 +389,15 @@ def suggest_album(db, items):
     return ranked[0] if len(ranked) == 1 else []
 
 
-def cached_edition(db, candidate, items):
-    audio = [item["audio"] for item in items if item.get("audio")]
+def cached_edition(db, candidate, items, *, context=None):
+    audio = [dict(item["audio"]) for item in items if item.get("audio")]
+    if context and len(audio) == len(items):
+        for track, item in zip(audio, items):
+            position, filename_title = filename_parts(item["name"], context.get("artist"), context.get("album"))
+            track["artist"] = track.get("artist") or context.get("artist")
+            track["album"] = track.get("album") or context.get("album")
+            track["title"] = track.get("title") or filename_title
+            track["track_number"] = track.get("track_number") or position
     if len(audio) < 2 or len(audio) != len(items):
         return None
     first = audio[0]
@@ -423,6 +487,12 @@ def review_download(db, candidate_id=None, original_track_id=None, *, include_so
     report = public_status({key: value for key, value in result.items() if key != "entries"})
     indexed = originals(db, original_track_id, result["kind"])
     report["kept_both"] = dict(kept) if kept else None
+    try:
+        receipt = read_job(directory)
+        parents_by_slot = {entry["directory"]: PureWindowsPath(entry["remote"]).parts[:-1]
+                           for entry in receipt["entries"]}
+    except (ValueError, OSError, KeyError, TypeError):
+        parents_by_slot = {}
     possible = set()
     deadline = monotonic() + 35
     for transfer, item in zip(result["items"], report["items"]):
@@ -443,7 +513,8 @@ def review_download(db, candidate_id=None, original_track_id=None, *, include_so
     if saved:
         report["edition_evidence"] = music_edition_evidence(json.loads(saved["report"]).get("edition_evidence"))
     if research and result["kind"] == "album" and len(report["items"]) == report["complete"]:
-        report["edition_evidence"] = cached_edition(db, candidate_id, report["items"])
+        report["edition_evidence"] = cached_edition(db, candidate_id, report["items"],
+                                                      context=indexed[0] if indexed else None)
     suggested = original_track_id is None and result["kind"] == "album"
     if suggested:
         indexed = suggest_album(db, report["items"])
@@ -465,9 +536,9 @@ def review_download(db, candidate_id=None, original_track_id=None, *, include_so
         if "audio" not in item:
             continue
         metadata = item["audio"]
-        assessment, original = match_item(metadata, [explicit] if album_mismatch and explicit else indexed,
-                                          result["kind"], item["name"])
-        if album_mismatch:
+        parents = parents_by_slot.get(Path(item["source"]).parent.name, ())
+        assessment, original = match_item(metadata, indexed, result["kind"], item["name"], parents=parents)
+        if album_mismatch and assessment in MATCH_ASSESSMENTS | {"metadata fallback"}:
             assessment = "check release tags"
         if (assessment in {"check duration", "check release tags"} and len(exact) == 1
                 and item is exact[0] and metadata["quality"] == "lossless"
